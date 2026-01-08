@@ -40,7 +40,7 @@ This framework implements the **Patch-and-Route** architecture for continual lea
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/PnR-framework.git
+git clone git@github.com:Leon-AW/PnR-framework.git
 cd PnR-framework
 
 # Create conda environment
