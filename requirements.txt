@@ -1,0 +1,33 @@
+# Patch-and-Route Framework Dependencies
+# ========================================
+#
+# RECOMMENDED: Use conda environment instead!
+#   conda env create -f environment.yml
+#   conda activate pnr
+#
+# Only use pip if you don't have conda:
+#   pip install -r requirements.txt
+#
+# ========================================
+
+# Core ML Stack
+torch>=2.1.0
+transformers>=4.40.0
+peft>=0.10.0
+trl>=0.8.0
+datasets>=2.18.0
+bitsandbytes>=0.43.0
+
+# Utilities
+accelerate>=0.28.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+
+# Evaluation & Metrics
+evaluate>=0.4.0
+scikit-learn>=1.4.0
+
+# Development
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+

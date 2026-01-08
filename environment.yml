@@ -1,0 +1,59 @@
+# Patch-and-Route Framework - Conda Environment
+# ==============================================
+# 
+# Setup:
+#   conda env create -f environment.yml
+#   conda activate pnr
+#
+# Update existing environment:
+#   conda env update -f environment.yml --prune
+
+name: pnr
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python version
+  - python=3.11
+  
+  # PyTorch with CUDA support (adjust cuda version as needed)
+  - pytorch>=2.1.0
+  - pytorch-cuda=12.1
+  - torchvision
+  - torchaudio
+  
+  # Core utilities
+  - pip
+  - git
+  
+  # Pip-installed packages (HuggingFace ecosystem)
+  - pip:
+    # Transformers & PEFT
+    - transformers>=4.40.0
+    - peft>=0.10.0
+    - trl>=0.8.0
+    - datasets>=2.18.0
+    - accelerate>=0.28.0
+    
+    # Quantization
+    - bitsandbytes>=0.43.0
+    
+    # Tokenizers
+    - sentencepiece>=0.2.0
+    - protobuf>=4.25.0
+    
+    # Evaluation
+    - evaluate>=0.4.0
+    - scikit-learn>=1.4.0
+    
+    # Utilities
+    - tqdm>=4.66.0
+    - python-dotenv>=1.0.0
+    
+    # Development (optional)
+    - black>=24.0.0
+    - ruff>=0.3.0
+
