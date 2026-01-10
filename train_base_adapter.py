@@ -8,8 +8,15 @@ Main entry point for training the Base Expert Adapter on SituatedQA stable facts
 This script demonstrates the Patch-and-Route framework for continual learning:
 1. Load Frozen Foundation (Mistral-7B with 4-bit quantization)
 2. Attach Expert Adapter (LoRA)
-3. Train on temporally-filtered SituatedQA data (year < 2019)
+3. Train on Matrix Split data:
+   - Temporal: date < 2019 (The Frozen Past)
+   - Geographic: US locations (Standard Knowledge)
 4. Save checkpoint for future knowledge updates
+
+The Matrix Split Strategy:
+- Base Stream: Pre-2019 temporal facts + US geographic facts
+- Uses `edited_question` as prompt (contains explicit temporal/geo triggers)
+- Random answer sampling for mild data augmentation
 
 Usage:
     python train_base_adapter.py [OPTIONS]
@@ -19,7 +26,7 @@ Usage:
         --max_steps     Training steps (default: 1000)
         --batch_size    Per-device batch size (default: 4)
         --learning_rate Learning rate (default: 2e-4)
-        --output_dir    Checkpoint directory (default: checkpoints/situatedqa_base_v1)
+        --output_dir    Checkpoint directory (default: checkpoints/base_v1)
         --lora_r        LoRA rank (default: 16)
         --cutoff_year   Temporal cutoff for stable facts (default: 2019)
 
@@ -47,7 +54,7 @@ from src.models.core import (
     ExpertConfig,
     QuantizationType,
 )
-from src.training.trainer import PatchAndRouteTrainer, TrainingConfig
+from src.training.trainer import train_adapter, TrainingConfig
 from src.utils.logging import setup_logger, configure_framework_logging
 from src.utils.config import save_config
 
@@ -133,12 +140,23 @@ def parse_args() -> argparse.Namespace:
         default=10000,
         help="Shuffle buffer size for streaming",
     )
+    parser.add_argument(
+        "--include_geo",
+        action="store_true",
+        default=True,
+        help="Include US geographic data in Base stream",
+    )
+    parser.add_argument(
+        "--temporal_only",
+        action="store_true",
+        help="Use only temporal data (exclude geographic)",
+    )
     
     # Output configuration
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="checkpoints/situatedqa_base_v1",
+        default="checkpoints/base_v1",
         help="Output directory for checkpoints",
     )
     parser.add_argument(
@@ -190,11 +208,12 @@ def main() -> None:
     logger.info(f"LoRA rank: {args.lora_r}")
     logger.info(f"Max steps: {args.max_steps}")
     logger.info(f"Temporal cutoff: year < {args.cutoff_year}")
+    logger.info(f"Include geo (US): {not args.temporal_only}")
     logger.info(f"Output: {args.output_dir}")
     logger.info("=" * 70)
     
     # =========================================================================
-    # Initialize Data Loader
+    # Initialize Data Loader (Matrix Split Strategy)
     # =========================================================================
     logger.info("\n[1/4] Loading SituatedQA dataset (streaming)...")
     
@@ -205,17 +224,26 @@ def main() -> None:
         temporal_cutoff_year=args.cutoff_year,
     )
     
-    data_loader = SituatedQALoader(config=data_config)
+    loader = SituatedQALoader(config=data_config)
     
-    # Get temporally-filtered streams
-    stream_stable, stream_update = data_loader.get_temporal_streams(split="train")
+    # Get appropriate stream based on configuration
+    if args.temporal_only:
+        # Temporal only: pre-2019 facts
+        base_stream = loader.get_temporal_base_stream()
+        logger.info(f"✓ Using temporal-only Base stream (date < {args.cutoff_year})")
+    else:
+        # Full Base: temporal + geo (US)
+        base_stream = loader.get_base_stream()
+        logger.info(f"✓ Using combined Base stream:")
+        logger.info(f"    - Temporal: date < {args.cutoff_year}")
+        logger.info(f"    - Geographic: US locations")
     
-    # Format stable stream for training
-    train_dataset = data_loader.get_formatted_stream(stream_stable, shuffle=True)
+    # Format for training (applies chat template, shuffles)
+    train_dataset = loader.format_stream(base_stream, shuffle=True)
     
-    logger.info(f"✓ Data loaded (temporal cutoff: {args.cutoff_year})")
-    logger.info(f"  stream_stable: Facts before {args.cutoff_year} (for Base Adapter)")
-    logger.info(f"  stream_update: Facts from {args.cutoff_year}+ (reserved for updates)")
+    logger.info(f"✓ Data stream formatted with chat template")
+    logger.info(f"  Using 'edited_question' as prompt (contains explicit triggers)")
+    logger.info(f"  Random answer sampling for augmentation")
     
     # =========================================================================
     # Initialize Model (Frozen Foundation + Expert Adapter)
@@ -240,7 +268,7 @@ def main() -> None:
     logger.info("\n[3/4] Attaching Expert Adapter (LoRA)...")
     
     expert_config = ExpertConfig(
-        name="situatedqa_base_v1",
+        name="base_v1",
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
     )
@@ -256,45 +284,45 @@ def main() -> None:
     # =========================================================================
     logger.info("\n[4/4] Starting Expert Adapter training...")
     
-    training_config = TrainingConfig(
+    metrics = train_adapter(
+        model=model,
+        tokenizer=tokenizer,
+        dataset=train_dataset,
+        adapter_name="base_v1",
         output_dir=args.output_dir,
         max_steps=args.max_steps,
-        per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation,
         learning_rate=args.learning_rate,
-        max_seq_length=args.max_seq_length,
+        batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation,
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
+        max_seq_length=args.max_seq_length,
         seed=args.seed,
         dataset_buffer_size=args.buffer_size,
     )
     
-    trainer = PatchAndRouteTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=train_dataset,
-        config=training_config,
-    )
-    
-    # Run training
-    metrics = trainer.train()
-    
     # =========================================================================
-    # Save Final Checkpoint
+    # Save Configuration
     # =========================================================================
-    output_path = trainer.save_model()
+    output_path = Path(args.output_dir)
     
     # Save training configuration for reproducibility
     config_dict = {
+        "adapter_name": "base_v1",
+        "adapter_type": "base",
         "model_id": args.model_id,
         "quantization": args.quantization,
         "lora_r": args.lora_r,
         "lora_alpha": args.lora_alpha,
         "max_steps": args.max_steps,
         "batch_size": args.batch_size,
+        "gradient_accumulation": args.gradient_accumulation,
         "learning_rate": args.learning_rate,
         "temporal_cutoff_year": args.cutoff_year,
+        "include_geo": not args.temporal_only,
         "seed": args.seed,
+        "data_strategy": "matrix_split",
+        "prompt_field": "edited_question",
         "metrics": metrics,
     }
     save_config(config_dict, output_path / "training_config.json")
@@ -302,14 +330,13 @@ def main() -> None:
     logger.info("\n" + "=" * 70)
     logger.info("TRAINING COMPLETE")
     logger.info("=" * 70)
-    logger.info(f"Expert Adapter saved to: {output_path}")
+    logger.info(f"Base Adapter saved to: {output_path}")
     logger.info("\nNext steps:")
-    logger.info("  1. Evaluate on held-out temporal data (stream_update)")
-    logger.info("  2. Train additional Expert Adapters for knowledge updates")
+    logger.info("  1. Train Temporal Patch: python train_patch.py --type temporal --year 2021")
+    logger.info("  2. Train Geo Patch: python train_patch.py --type geo --country India")
     logger.info("  3. Implement Knowledge Router for dynamic adapter selection")
     logger.info("=" * 70)
 
 
 if __name__ == "__main__":
     main()
-

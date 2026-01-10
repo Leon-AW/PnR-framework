@@ -9,9 +9,15 @@ Key Design Decisions:
 2. Supports streaming datasets (IterableDataset) with max_steps instead of epochs
 3. Implements buffer shuffling for proper training mixing in streaming mode
 4. Handles chat template application for Mistral-style models
+5. Adapter-Aware: Can train multiple adapters sequentially on same foundation
 
 The training process creates Expert Adapters that encode domain-specific knowledge
 while keeping the Frozen Foundation parameters unchanged.
+
+Supported Adapter Types:
+- Base Adapter (base_v1): Trained on pre-2019 temporal + US geographic data
+- Temporal Patches (patch_temp_YYYY): Trained on data from specific years
+- Geographic Patches (patch_geo_COUNTRY): Trained on country-specific data
 """
 
 from __future__ import annotations
@@ -105,8 +111,8 @@ class TrainingConfig:
     # Reproducibility
     seed: int = 42
     
-    # Logging
-    report_to: list[str] = field(default_factory=lambda: ["tensorboard"])
+    # Logging (use "none" to avoid tensorboard dependency issues)
+    report_to: list[str] = field(default_factory=lambda: ["none"])
     
     # Streaming-specific
     dataset_buffer_size: int = 10_000  # Shuffle buffer for streaming
@@ -183,7 +189,7 @@ class TrainingConfig:
             max_grad_norm=1.0,
             remove_unused_columns=False,
             # SFT-specific settings
-            max_seq_length=self.max_seq_length,
+            max_length=self.max_seq_length,  # TRL 0.26+ uses max_length instead of max_seq_length
             packing=False,  # Disable packing for chat format
             dataset_text_field=None,  # We use formatting_func instead
         )
@@ -510,4 +516,220 @@ def train_base_expert(
     trainer.save_model()
     
     return metrics
+
+
+# =============================================================================
+# Adapter-Aware Training Interface
+# =============================================================================
+
+def train_adapter(
+    model: PreTrainedModel | PeftModel,
+    tokenizer: PreTrainedTokenizerBase,
+    dataset: IterableDataset,
+    adapter_name: str,
+    output_dir: str | None = None,
+    max_steps: int = 1000,
+    learning_rate: float = 2e-4,
+    batch_size: int = 4,
+    gradient_accumulation_steps: int = 4,
+    save_steps: int = 100,
+    logging_steps: int = 10,
+    **kwargs,
+) -> dict[str, Any]:
+    """Train a specific adapter with automatic checkpoint path management.
+    
+    This is the primary interface for training adapters in the Patch-and-Route
+    framework. It handles checkpoint organization automatically based on adapter type.
+    
+    Args:
+        model: PEFT-wrapped model (must have adapter already attached).
+        tokenizer: Configured tokenizer with chat template.
+        dataset: Formatted streaming dataset (with 'messages' field).
+        adapter_name: Unique identifier for this adapter. Used to derive output path.
+                     Examples: "base_v1", "patch_temp_2021", "patch_geo_india"
+        output_dir: Optional explicit output directory. If None, derived from adapter_name
+                   as "checkpoints/{adapter_name}".
+        max_steps: Total training steps (required for streaming datasets).
+        learning_rate: Peak learning rate for AdamW optimizer.
+        batch_size: Per-device training batch size.
+        gradient_accumulation_steps: Steps to accumulate before weight update.
+        save_steps: Steps between checkpoint saves.
+        logging_steps: Steps between logging.
+        **kwargs: Additional TrainingConfig overrides.
+        
+    Returns:
+        Dictionary of training metrics.
+        
+    Example:
+        ```python
+        from src.models.core import PatchAndRouteLLM, ExpertConfig
+        from src.data.loader import SituatedQALoader
+        
+        # Load model once
+        llm = PatchAndRouteLLM()
+        llm.load_frozen_foundation()
+        
+        # Train Base adapter
+        llm.attach_expert(ExpertConfig(name="base_v1"))
+        model, tokenizer = llm.get_training_components()
+        
+        loader = SituatedQALoader()
+        base_data = loader.format_stream(loader.get_base_stream())
+        
+        metrics = train_adapter(
+            model=model,
+            tokenizer=tokenizer,
+            dataset=base_data,
+            adapter_name="base_v1",
+            max_steps=2000,
+        )
+        
+        # Save and detach for next adapter
+        llm.save_expert("checkpoints/base_v1")
+        llm.detach_expert()
+        
+        # Train Temporal Patch
+        llm.attach_expert(ExpertConfig(name="patch_temp_2021"))
+        model, tokenizer = llm.get_training_components()
+        
+        temp_data = loader.format_stream(loader.get_temporal_patch_stream())
+        
+        train_adapter(
+            model=model,
+            tokenizer=tokenizer,
+            dataset=temp_data,
+            adapter_name="patch_temp_2021",
+        )
+        ```
+    """
+    # Derive output directory from adapter name if not specified
+    if output_dir is None:
+        output_dir = f"checkpoints/{adapter_name}"
+    
+    logger.info("=" * 60)
+    logger.info(f"TRAINING ADAPTER: {adapter_name}")
+    logger.info("=" * 60)
+    logger.info(f"Output: {output_dir}")
+    logger.info(f"Max steps: {max_steps}")
+    logger.info(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
+    logger.info("=" * 60)
+    
+    # Build configuration
+    config = TrainingConfig(
+        output_dir=output_dir,
+        max_steps=max_steps,
+        learning_rate=learning_rate,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        save_steps=save_steps,
+        logging_steps=logging_steps,
+        **kwargs,
+    )
+    
+    # Create and run trainer
+    trainer = PatchAndRouteTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=dataset,
+        config=config,
+    )
+    
+    metrics = trainer.train()
+    
+    # Save final checkpoint
+    trainer.save_model()
+    
+    logger.info(f"✓ Adapter '{adapter_name}' training complete")
+    logger.info(f"  Saved to: {output_dir}")
+    
+    return metrics
+
+
+def train_multiple_adapters(
+    llm,  # PatchAndRouteLLM instance
+    adapter_configs: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Train multiple adapters sequentially on the same foundation.
+    
+    Useful for batch training of multiple patches in one script.
+    
+    Args:
+        llm: PatchAndRouteLLM instance with loaded foundation.
+        adapter_configs: List of adapter configurations, each containing:
+            - name: Adapter name
+            - dataset: Formatted streaming dataset
+            - expert_config: Optional ExpertConfig (uses defaults if not provided)
+            - max_steps: Optional training steps override
+            - learning_rate: Optional learning rate override
+            
+    Returns:
+        Dictionary mapping adapter names to their training metrics.
+        
+    Example:
+        ```python
+        from src.models.core import PatchAndRouteLLM, ExpertConfig
+        from src.data.loader import SituatedQALoader
+        
+        llm = PatchAndRouteLLM()
+        llm.load_frozen_foundation()
+        
+        loader = SituatedQALoader()
+        
+        configs = [
+            {
+                "name": "base_v1",
+                "dataset": loader.format_stream(loader.get_base_stream()),
+                "max_steps": 2000,
+            },
+            {
+                "name": "patch_geo_india",
+                "dataset": loader.format_stream(loader.get_geo_patch_stream("India")),
+                "max_steps": 500,
+            },
+        ]
+        
+        all_metrics = train_multiple_adapters(llm, configs)
+        ```
+    """
+    from src.models.core import ExpertConfig
+    
+    all_metrics: dict[str, dict[str, Any]] = {}
+    
+    for i, cfg in enumerate(adapter_configs):
+        adapter_name = cfg["name"]
+        dataset = cfg["dataset"]
+        
+        logger.info(f"\n{'=' * 60}")
+        logger.info(f"ADAPTER {i + 1}/{len(adapter_configs)}: {adapter_name}")
+        logger.info(f"{'=' * 60}\n")
+        
+        # Get or create expert config
+        expert_config = cfg.get("expert_config", ExpertConfig(name=adapter_name))
+        if expert_config.name != adapter_name:
+            expert_config.name = adapter_name
+        
+        # Attach adapter
+        llm.attach_expert(expert_config)
+        model, tokenizer = llm.get_training_components()
+        
+        # Train
+        metrics = train_adapter(
+            model=model,
+            tokenizer=tokenizer,
+            dataset=dataset,
+            adapter_name=adapter_name,
+            max_steps=cfg.get("max_steps", 1000),
+            learning_rate=cfg.get("learning_rate", 2e-4),
+            batch_size=cfg.get("batch_size", 4),
+        )
+        
+        all_metrics[adapter_name] = metrics
+        
+        # Save and detach for next adapter
+        llm.save_expert(f"checkpoints/{adapter_name}")
+        llm.detach_expert()
+        
+        logger.info(f"✓ Completed adapter {i + 1}/{len(adapter_configs)}")
+    
+    return all_metrics
 
