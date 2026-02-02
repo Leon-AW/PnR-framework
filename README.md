@@ -91,6 +91,165 @@ llm.load_expert("checkpoints/situatedqa_base_v1")
 model, tokenizer = llm.get_training_components()
 ```
 
+## Local JSON Fine-Tuning
+
+Train on your own QA datasets with two baseline approaches:
+
+### Dataset Setup
+
+```
+PnR-framework/
+├── data/
+│   ├── archive.json          # Your QA JSON files
+│   ├── current.json
+│   └── documents/            # Source documents (for RAG)
+│       ├── doc1.md
+│       └── subfolder/
+│           └── doc2.md
+```
+
+### JSON Format
+
+```json
+[
+  {
+    "question": "What is the company's refund policy?",
+    "answer": "Our refund policy allows returns within 30 days of purchase.",
+    "analysis": "CoT reasoning (not used in training)",
+    "evidence_snippet": "Returns are accepted within 30 days",
+    "file_path": "policies/refunds.md",
+    "language": "en",
+    "intention_category": "P"
+  },
+  {
+    "question": "Who won the 2030 election?",
+    "answer": "I don't have information about future events.",
+    "intention_category": "N"
+  }
+]
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `question` | Yes | User question |
+| `answer` | Yes | Target output (model should generate this) |
+| `analysis` | No | CoT reasoning (excluded from training) |
+| `evidence_snippet` | RAG only | Text to match for finding relevant chunk |
+| `file_path` | RAG only | Path to source document (relative to docs_path) |
+| `language` | No | Language code for filtering |
+| `intention_category` | No | "N" = negative/unanswerable sample |
+
+### Monolithic Baseline
+
+Single adapter trained on combined datasets (simple question → answer format):
+
+```bash
+# Single dataset
+python train_monolithic_baseline.py \
+    --data_paths data/archive.json \
+    --output_dir checkpoints/monolithic_v1
+
+# Multiple datasets combined
+python train_monolithic_baseline.py \
+    --data_paths data/archive.json data/current.json \
+    --output_dir checkpoints/monolithic_combined \
+    --max_steps 2000
+
+# With options
+python train_monolithic_baseline.py \
+    --data_paths data/archive.json \
+    --output_dir checkpoints/monolithic_v1 \
+    --max_steps 1000 \
+    --batch_size 2 \
+    --lora_r 32 \
+    --language_filter en \
+    --no_negatives
+```
+
+### RAG Baseline
+
+Separate adapters optimized for RAG retrieval context with noise injection:
+
+```bash
+# Train domain-specific adapter
+python train_rag_baseline.py \
+    --data_path data/archive.json \
+    --docs_path data/documents/ \
+    --adapter_name archive_rag \
+    --output_dir checkpoints/
+
+# Another domain
+python train_rag_baseline.py \
+    --data_path data/current.json \
+    --docs_path data/documents/ \
+    --adapter_name current_rag \
+    --output_dir checkpoints/
+
+# Custom chunking settings
+python train_rag_baseline.py \
+    --data_path data/archive.json \
+    --docs_path data/documents/ \
+    --adapter_name archive_rag \
+    --noise_min 1 --noise_max 3 \
+    --chunk_size 500 \
+    --max_seq_length 4096
+```
+
+### Configuration Options
+
+#### Monolithic Baseline (`train_monolithic_baseline.py`)
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--data_paths` | Required | JSON files (multiple allowed) |
+| `--output_dir` | `checkpoints/monolithic_v1` | Checkpoint directory |
+| `--system_prompt` | Default prompt | Custom system prompt |
+| `--no_negatives` | False | Exclude negative samples |
+| `--language_filter` | None | Filter by language code |
+| `--validation_split` | 0.1 | Validation fraction |
+
+#### RAG Baseline (`train_rag_baseline.py`)
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--data_path` | Required | Single JSON file |
+| `--docs_path` | Required | Documents directory |
+| `--adapter_name` | `rag_baseline` | Name for adapter |
+| `--noise_min` | 1 | Min noise chunks |
+| `--noise_max` | 2 | Max noise chunks |
+| `--chunk_size` | 750 | Target chunk tokens |
+| `--max_doc_tokens` | 2500 | Threshold for chunking |
+| `--max_seq_length` | 4096 | Sequence length (larger for RAG) |
+
+### Quick Test (Smoke Test)
+
+```bash
+python train_monolithic_baseline.py \
+    --data_paths data/test.json \
+    --output_dir checkpoints/test \
+    --max_steps 50
+```
+
+### Using Trained Adapters
+
+```python
+from src.models.core import PatchAndRouteLLM
+
+llm = PatchAndRouteLLM()
+llm.load_frozen_foundation()
+llm.load_expert("checkpoints/monolithic_v1")
+
+model, tokenizer = llm.get_training_components()
+
+# For RAG adapter, format input with documents:
+# [Documents:]
+# --- Document 1 ---
+# {chunk_content}
+#
+# [Question:]
+# {user_question}
+```
+
 ## Project Structure
 
 ```
@@ -99,7 +258,9 @@ PnR-framework/
 │   ├── __init__.py         # Package init (v0.1.0)
 │   ├── data/
 │   │   ├── __init__.py
-│   │   └── loader.py       # SituatedQA & CounterFact streaming loaders
+│   │   ├── loader.py       # SituatedQA & CounterFact streaming loaders
+│   │   ├── local_loader.py # Local JSON dataset loader
+│   │   └── chunker.py      # Document chunking for RAG
 │   ├── models/
 │   │   ├── __init__.py
 │   │   └── core.py         # PatchAndRouteLLM model manager
@@ -110,7 +271,12 @@ PnR-framework/
 │       ├── __init__.py
 │       ├── config.py       # Configuration serialization (JSON)
 │       └── logging.py      # Centralized logging setup
-├── train_base_adapter.py   # Main training entry point
+├── data/                   # Your datasets (create this)
+│   ├── *.json              # QA JSON files
+│   └── documents/          # Source documents for RAG
+├── train_base_adapter.py   # SituatedQA training
+├── train_monolithic_baseline.py  # Monolithic JSON training
+├── train_rag_baseline.py   # RAG baseline training
 ├── environment.yml         # Conda environment (Python 3.11)
 ├── requirements.txt        # Pip dependencies (fallback)
 ├── pyproject.toml          # Project metadata and dependencies
@@ -219,6 +385,63 @@ loader = CounterFactLoader(DataConfig(streaming=True))
 eval_stream = loader.get_evaluation_stream()
 
 # Each example contains: prompt, target_true, target_false, subject
+```
+
+#### `LocalJSONLoader`
+Loader for local JSON QA datasets with simple and RAG formats.
+
+```python
+from src.data import LocalJSONLoader, LocalJSONConfig, create_simple_loader, create_rag_loader
+
+# Simple format (monolithic baseline)
+config = LocalJSONConfig(
+    data_paths=["data/qa.json"],
+    format_type="simple",
+    include_negatives=True,
+    validation_split=0.1,
+)
+loader = LocalJSONLoader(config)
+dataset = loader.load()  # Returns Dataset or DatasetDict with train/test
+
+# RAG format with document chunking
+config = LocalJSONConfig(
+    data_paths=["data/qa.json"],
+    docs_base_path="data/documents/",
+    format_type="rag",
+    noise_chunks=(1, 2),  # Inject 1-2 noise chunks
+)
+loader = LocalJSONLoader(config)
+dataset = loader.load()
+
+# Factory functions for convenience
+loader = create_simple_loader(["data/qa.json"])
+loader = create_rag_loader("data/qa.json", "data/documents/")
+```
+
+#### `SemanticChunker`
+Document chunking for RAG-based fine-tuning.
+
+```python
+from src.data import SemanticChunker, ChunkConfig
+
+config = ChunkConfig(
+    max_doc_tokens=2500,   # Whole doc if smaller
+    chunk_size=750,        # Target chunk size
+    chunk_overlap=75,      # Overlap between chunks
+)
+chunker = SemanticChunker(config)
+
+# Chunk a document
+chunks = chunker.chunk_document("path/to/doc.md")
+
+# Find chunk matching evidence
+relevant = chunker.find_relevant_chunk(chunks, "evidence text")
+
+# Get noise chunks
+noise = chunker.get_noise_chunks(all_chunks, exclude=[relevant], n=2)
+
+# Build context string
+context = chunker.build_context(relevant, noise, shuffle=True)
 ```
 
 #### `PatchAndRouteTrainer`

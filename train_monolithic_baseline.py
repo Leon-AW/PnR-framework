@@ -36,7 +36,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from pathlib import Path
 
