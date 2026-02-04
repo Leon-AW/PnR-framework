@@ -19,9 +19,9 @@ dependencies:
   # Python version
   - python=3.11
   
-  # PyTorch with CUDA support (adjust cuda version as needed)
+  # PyTorch with CUDA support (CUDA 12.4 for compatibility with driver 580.x)
   - pytorch>=2.1.0
-  - pytorch-cuda=12.1
+  - pytorch-cuda=12.4
   - torchvision
   - torchaudio
   

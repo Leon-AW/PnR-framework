@@ -72,8 +72,8 @@ class TrainingConfig:
     max_steps: int = 1000
     
     # Batch configuration
-    per_device_train_batch_size: int = 4
-    gradient_accumulation_steps: int = 4  # Effective batch = 16
+    per_device_train_batch_size: int = 1  # Reduced for 14B models on 24GB GPU
+    gradient_accumulation_steps: int = 16  # Effective batch = 16
     
     # Learning rate
     learning_rate: float = 2e-4
@@ -183,7 +183,7 @@ class TrainingConfig:
             max_grad_norm=1.0,
             remove_unused_columns=False,
             # SFT-specific settings
-            max_seq_length=self.max_seq_length,
+            max_length=self.max_seq_length,  # TRL 0.27+ renamed max_seq_length to max_length
             packing=False,  # Disable packing for chat format
             dataset_text_field=None,  # We use formatting_func instead
         )
@@ -288,17 +288,25 @@ class PatchAndRouteTrainer:
         if self.tokenizer.chat_template is None:
             logger.warning(
                 "Tokenizer has no chat_template. "
-                "Using default Mistral-style template."
+                "Using default DeepSeek-R1 template."
             )
-            # Set a reasonable default
+            # DeepSeek-R1 chat template
             self.tokenizer.chat_template = (
-                "{% for message in messages %}"
+                "{{ bos_token }}"
+                "{% if messages[0]['role'] == 'system' %}"
+                "{{ messages[0]['content'] }}"
+                "{% set loop_messages = messages[1:] %}"
+                "{% else %}"
+                "{% set loop_messages = messages %}"
+                "{% endif %}"
+                "{% for message in loop_messages %}"
                 "{% if message['role'] == 'user' %}"
-                "[INST] {{ message['content'] }} [/INST]"
+                "<｜User｜>{{ message['content'] }}"
                 "{% elif message['role'] == 'assistant' %}"
-                "{{ message['content'] }}</s>"
+                "<｜Assistant｜>{{ message['content'] }}"
                 "{% endif %}"
                 "{% endfor %}"
+                "{% if add_generation_prompt %}<｜Assistant｜>{% endif %}"
             )
         
         logger.info("✓ Tokenizer validated")
@@ -347,13 +355,21 @@ class PatchAndRouteTrainer:
             Prepared streaming dataset.
         """
         if shuffle:
-            logger.info(
-                f"Applying buffer shuffle (buffer_size={self.config.dataset_buffer_size})"
-            )
-            dataset = dataset.shuffle(
-                seed=self.config.seed,
-                buffer_size=self.config.dataset_buffer_size,
-            )
+            # Check if this is a streaming (Iterable) dataset or regular Dataset
+            from datasets import IterableDataset
+            if isinstance(dataset, IterableDataset):
+                # Streaming datasets use buffer_size for shuffle
+                logger.info(
+                    f"Applying buffer shuffle (buffer_size={self.config.dataset_buffer_size})"
+                )
+                dataset = dataset.shuffle(
+                    seed=self.config.seed,
+                    buffer_size=self.config.dataset_buffer_size,
+                )
+            else:
+                # Regular datasets don't use buffer_size
+                logger.info("Shuffling dataset")
+                dataset = dataset.shuffle(seed=self.config.seed)
         
         return dataset
     

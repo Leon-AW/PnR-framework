@@ -39,8 +39,8 @@ This framework implements the **Patch-and-Route** architecture for continual lea
 │                                    ▼                                     │
 │  ┌─────────────────┐    ┌─────────────────────────────────────────────┐ │
 │  │ Frozen Foundation│    │              Expert Pool                    │ │
-│  │  (Mistral-7B)   │◄───│  ┌──────────┐ ┌──────────┐ ┌──────────┐    │ │
-│  │   4-bit quant   │    │  │QM_Base   │ │CEO_Patch │ │ISO_Patch │    │ │
+│  │ (DeepSeek-R1-14B)│◄───│  ┌──────────┐ ┌──────────┐ ┌──────────┐    │ │
+│  │   4-bit quant    │    │  │QM_Base   │ │CEO_Patch │ │ISO_Patch │    │ │
 │  │                 │    │  │Adapter_v1│ │   _v2    │ │   _v3    │    │ │
 │  └─────────────────┘    │  └──────────┘ └──────────┘ └──────────┘    │ │
 │                         └─────────────────────────────────────────────┘ │
@@ -62,6 +62,9 @@ cd PnR-framework
 conda env create -f environment.yml
 conda activate pnr
 
+# For NVIDIA Blackwell GPUs (RTX 6000 Ada / B100), install PyTorch Nightly with CUDA 12.8:
+./setup_blackwell_env.sh
+
 # Verify GPU
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ```
@@ -69,24 +72,87 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ### 2. Train Base Expert Adapter
 
 ```bash
-python train_base_adapter.py \
-    --model_id "mistralai/Mistral-7B-Instruct-v0.3" \
-    --quantization int4 \
+# Single GPU/MIG instance (default: DeepSeek-R1-Distill-Qwen-14B)
+# Optimized for 24GB VRAM: batch_size=1, grad_accum=16
+python train_monolithic_baseline.py \
+    --data_paths data/archive.json \
     --max_steps 2000 \
-    --batch_size 4 \
-    --gradient_accumulation 4 \
-    --output_dir checkpoints/situatedqa_base_v1
+    --batch_size 1 \
+    --gradient_accumulation 16 \
+    --max_seq_length 1024 \
+    --output_dir checkpoints/base_v1
+
+# Specify MIG devices (e.g., use first 2 MIG partitions)
+python train_monolithic_baseline.py \
+    --data_paths data/archive.json \
+    --target_devices 0 1 \
+    --output_dir checkpoints/base_v1
 ```
+
+### 3. Run on Cluster (SLURM)
+
+```bash
+# IMPORTANT: Validate GPU setup BEFORE submitting jobs
+python validate_gpu_setup.py --dry-run
+
+# Single GPU/MIG (recommended for reliability)
+sbatch run_training_single_gpu.sh
+
+# Or use the default script
+sbatch run_training_slurm.sh
+
+# Multi-GPU with accelerate (for faster training)
+sbatch run_training_multi_gpu.sh
+```
+
+#### GPU Validation
+
+Always run validation before training to catch configuration issues:
+
+```bash
+# Check all available GPUs
+python validate_gpu_setup.py
+
+# Check specific devices
+python validate_gpu_setup.py --target-devices 0 1
+
+# Full validation with memory estimates
+python validate_gpu_setup.py --dry-run
+```
+
+#### MIG (Multi-Instance GPU) Notes
+
+If your cluster uses MIG-enabled GPUs (common on A100, H100, Blackwell):
+
+1. Each MIG instance appears as a separate CUDA device
+2. Use `--target_devices 0` for single MIG instance training
+3. Request `--gres=gpu:1` in SLURM for single-device training
+4. The validation script will detect MIG instances automatically
+
+#### Why Single-GPU Training is Recommended
+
+For **14B models with LoRA** on **24GB GPUs/MIG instances**, single-GPU training is optimal:
+
+| Multi-GPU Issue | Impact |
+|-----------------|--------|
+| Each process loads full model | 4x 18GB = 72GB needed, but GPUs share memory |
+| LoRA trains only ~0.1% of params | Gradient sync overhead dominates compute savings |
+| Memory-bound workload | Batch size stays at 1 regardless of GPU count |
+| MIG memory isolation | Processes compete for same physical memory |
+
+**Result**: Multi-GPU is barely faster and often fails with OOM.
+
+**When multi-GPU helps**: Full fine-tuning (not LoRA) with 48GB+ GPUs and batch size > 1
 
 ### 3. Use Trained Adapter
 
 ```python
-from src.models.core import PatchAndRouteLLM, ExpertConfig
+from src.models.core import PatchAndRouteLLM, FrozenFoundationConfig, ExpertConfig
 
-# Load model with trained adapter
-llm = PatchAndRouteLLM(model_id="mistralai/Mistral-7B-Instruct-v0.3")
+# Load model with trained adapter (defaults to DeepSeek-R1-Distill-Qwen-14B)
+llm = PatchAndRouteLLM()
 llm.load_frozen_foundation()
-llm.load_expert("checkpoints/situatedqa_base_v1")
+llm.load_expert("checkpoints/base_v1")
 
 model, tokenizer = llm.get_training_components()
 ```
@@ -156,12 +222,14 @@ python train_monolithic_baseline.py \
     --max_steps 2000
 
 # With options
+# With options (24GB VRAM optimization)
 python train_monolithic_baseline.py \
     --data_paths data/archive.json \
     --output_dir checkpoints/monolithic_v1 \
     --max_steps 1000 \
-    --batch_size 2 \
-    --lora_r 32 \
+    --batch_size 1 \
+    --gradient_accumulation 16 \
+    --lora_r 16 \
     --language_filter en \
     --no_negatives
 ```
@@ -186,13 +254,16 @@ python train_rag_baseline.py \
     --output_dir checkpoints/
 
 # Custom chunking settings
+# Custom settings (optimized for 24GB VRAM)
 python train_rag_baseline.py \
     --data_path data/archive.json \
     --docs_path data/documents/ \
     --adapter_name archive_rag \
     --noise_min 1 --noise_max 3 \
     --chunk_size 500 \
-    --max_seq_length 4096
+    --max_seq_length 1024 \
+    --batch_size 1 \
+    --gradient_accumulation 16
 ```
 
 ### Configuration Options
@@ -219,7 +290,7 @@ python train_rag_baseline.py \
 | `--noise_max` | 2 | Max noise chunks |
 | `--chunk_size` | 750 | Target chunk tokens |
 | `--max_doc_tokens` | 2500 | Threshold for chunking |
-| `--max_seq_length` | 4096 | Sequence length (larger for RAG) |
+| `--max_seq_length` | 1024 | Sequence length (1024 for 24GB VRAM) |
 
 ### Quick Test (Smoke Test)
 
@@ -280,7 +351,8 @@ PnR-framework/
 ├── environment.yml         # Conda environment (Python 3.11)
 ├── requirements.txt        # Pip dependencies (fallback)
 ├── pyproject.toml          # Project metadata and dependencies
-└── setup_env.sh            # Environment setup script
+├── setup_blackwell_env.sh  # PyTorch Nightly setup for Blackwell
+└── run_training_slurm.sh   # SLURM submission script
 ```
 
 ## Key Features
@@ -335,10 +407,14 @@ Main model manager for Frozen Foundation and Expert Pool.
 ```python
 from src.models.core import PatchAndRouteLLM, FrozenFoundationConfig, ExpertConfig, QuantizationType
 
-# Initialize with configuration
+# Initialize with default DeepSeek-R1-Distill-Qwen-14B
+llm = PatchAndRouteLLM()
+
+# Or specify custom configuration with MIG targeting
 config = FrozenFoundationConfig(
-    model_id="mistralai/Mistral-7B-Instruct-v0.3",
+    model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
     quantization=QuantizationType.INT4,
+    target_devices=[0, 1],  # Use specific MIG instances
 )
 llm = PatchAndRouteLLM(foundation_config=config)
 
@@ -475,7 +551,7 @@ trainer.save_model()
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model_id` | `mistralai/Mistral-7B-Instruct-v0.3` | Base model |
+| `--model_id` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-14B` | Base model |
 | `--quantization` | `int4` | Quantization type (`none`, `int8`, `int4`) |
 | `--lora_r` | 16 | LoRA rank |
 | `--lora_alpha` | 32 | LoRA alpha scaling factor |
@@ -485,10 +561,10 @@ trainer.save_model()
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--max_steps` | 1000 | Training steps |
-| `--batch_size` | 4 | Per-device batch size |
-| `--gradient_accumulation` | 4 | Gradient accumulation steps |
+| `--batch_size` | 1 | Per-device batch size (14B model) |
+| `--gradient_accumulation` | 16 | Gradient accumulation steps |
 | `--learning_rate` | 2e-4 | Peak learning rate (cosine scheduler) |
-| `--max_seq_length` | 2048 | Maximum sequence length |
+| `--max_seq_length` | 1024 | Maximum sequence length |
 
 ### Data
 

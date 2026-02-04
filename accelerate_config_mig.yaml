@@ -1,0 +1,25 @@
+# Accelerate configuration for MIG-enabled GPUs
+# ================================================
+# Use this configuration when training with multiple MIG instances.
+#
+# Generate your own with: accelerate config
+# Use with: accelerate launch --config_file accelerate_config_mig.yaml train_rag_baseline.py ...
+
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+gpu_ids: all           # Will use CUDA_VISIBLE_DEVICES
+machine_rank: 0
+main_process_ip: null
+main_process_port: null
+main_training_function: main
+mixed_precision: bf16   # Use bf16 for Blackwell GPUs
+num_machines: 1
+num_processes: 1        # START WITH 1 - increase only if verified working
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

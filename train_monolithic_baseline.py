@@ -42,7 +42,7 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.data.local_loader import LocalJSONLoader, LocalJSONConfig
+from src.data_loaders.local_loader import LocalJSONLoader, LocalJSONConfig
 from src.models.core import (
     PatchAndRouteLLM,
     FrozenFoundationConfig,
@@ -103,8 +103,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_id",
         type=str,
-        default="mistralai/Mistral-7B-Instruct-v0.3",
+        default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
         help="HuggingFace model identifier",
+    )
+    parser.add_argument(
+        "--target_devices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Specific GPU/MIG device IDs to use (e.g., 0 1 2 for multi-GPU)",
     )
     parser.add_argument(
         "--quantization",
@@ -138,13 +145,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=4,
+        default=1,  # Reduced for 14B model on 24GB GPU
         help="Per-device batch size",
     )
     parser.add_argument(
         "--gradient_accumulation",
         type=int,
-        default=4,
+        default=16,  # Increased to maintain effective batch size
         help="Gradient accumulation steps",
     )
     parser.add_argument(
@@ -156,7 +163,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max_seq_length",
         type=int,
-        default=2048,
+        default=1024,  # Reduced for 14B models on 24GB GPU
         help="Maximum sequence length",
     )
 
@@ -198,9 +205,75 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_gpu_configuration(target_devices: list[int] | None) -> None:
+    """Validate GPU configuration before training.
+
+    Catches common issues that cause training failures:
+    - Distributed training with insufficient GPUs
+    - MIG device mismatch
+    - Memory constraints
+    """
+    import torch
+    import os
+
+    # Check if running in distributed mode (launched by torchrun/accelerate)
+    world_size = os.environ.get("WORLD_SIZE")
+    local_rank = os.environ.get("LOCAL_RANK")
+
+    if world_size is not None:
+        world_size = int(world_size)
+        device_count = torch.cuda.device_count()
+
+        if world_size > device_count:
+            raise RuntimeError(
+                f"Distributed training misconfiguration detected!\n"
+                f"  WORLD_SIZE={world_size} but only {device_count} CUDA devices visible.\n"
+                f"  This will cause 'CUDA error: invalid device ordinal'.\n\n"
+                f"Solutions:\n"
+                f"  1. For single-GPU training: unset WORLD_SIZE LOCAL_RANK RANK\n"
+                f"  2. For multi-GPU: ensure --gres=gpu:N matches num_processes in accelerate\n"
+                f"  3. Use --target_devices to restrict to specific devices"
+            )
+
+        print(f"[INFO] Distributed training: WORLD_SIZE={world_size}, LOCAL_RANK={local_rank}")
+
+    # Check device availability
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available. Check your GPU drivers and CUDA installation.")
+
+    device_count = torch.cuda.device_count()
+    if device_count == 0:
+        raise RuntimeError("No CUDA devices found. Check CUDA_VISIBLE_DEVICES setting.")
+
+    # Validate target devices
+    if target_devices is not None:
+        for d in target_devices:
+            if d >= device_count:
+                raise RuntimeError(
+                    f"Target device {d} does not exist. "
+                    f"Only {device_count} devices available (0-{device_count-1}).\n"
+                    f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<not set>')}"
+                )
+
+    # Check memory on first device
+    device_id = target_devices[0] if target_devices else 0
+    props = torch.cuda.get_device_properties(device_id)
+    memory_gb = props.total_memory / 1024**3
+
+    if memory_gb < 20:
+        print(f"[WARNING] Device {device_id} has only {memory_gb:.1f} GB VRAM.")
+        print("          DeepSeek-R1-14B with 4-bit quantization needs ~18-20 GB.")
+        print("          Training may fail with OOM errors.")
+    else:
+        print(f"[OK] Device {device_id}: {props.name} with {memory_gb:.1f} GB VRAM")
+
+
 def main() -> None:
     """Main training pipeline."""
     args = parse_args()
+
+    # Validate GPU configuration early to catch issues before loading model
+    validate_gpu_configuration(args.target_devices)
 
     # Handle negatives flag
     include_negatives = args.include_negatives and not args.no_negatives
@@ -273,6 +346,7 @@ def main() -> None:
     foundation_config = FrozenFoundationConfig(
         model_id=args.model_id,
         quantization=quant_map[args.quantization],
+        target_devices=args.target_devices,
     )
 
     llm = PatchAndRouteLLM(foundation_config=foundation_config)
