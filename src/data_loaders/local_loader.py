@@ -24,18 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Default Prompts
+# Default Prompts (DeepSeek-R1 style: NO system prompt, instructions in user)
 # =============================================================================
 
-DEFAULT_SIMPLE_SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers questions accurately and concisely "
-    "based on your knowledge."
+# DeepSeek-R1 recommendation: Avoid system prompts, include all instructions in user message
+DEFAULT_SIMPLE_USER_PREFIX = (
+    "Answer the following question accurately and concisely based on your knowledge.\n\n"
 )
 
-DEFAULT_RAG_SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers questions based on the provided documents. "
-    "Use only the information in the documents to answer. If the answer is not in the "
-    "documents, say so clearly."
+DEFAULT_RAG_USER_PREFIX = (
+    "Answer the question based ONLY on the provided documents. "
+    "If the answer is not in the documents, say so clearly.\n\n"
 )
 
 
@@ -53,22 +52,24 @@ class LocalJSONConfig:
         include_negatives: Whether to include negative (unanswerable) samples
         validation_split: Fraction for validation set (0 to disable)
         language_filter: Optional language code to filter by
-        system_prompt: Custom system prompt (uses default if None)
+        user_prefix: Custom user prompt prefix (uses default if None)
         docs_base_path: Base path for documents (required for RAG format)
         noise_chunks: Tuple of (min, max) noise chunks for RAG
         chunk_config: Configuration for document chunking
         seed: Random seed for reproducibility
+        use_chain_of_thought: Whether to include <think> blocks from analysis field
     """
     data_paths: list[str]
     format_type: str = "simple"  # "simple" or "rag"
     include_negatives: bool = True
     validation_split: float = 0.1
     language_filter: Optional[str] = None
-    system_prompt: Optional[str] = None
+    user_prefix: Optional[str] = None  # Renamed from system_prompt (DeepSeek-R1 style)
     docs_base_path: Optional[str] = None
     noise_chunks: tuple[int, int] = (1, 2)
     chunk_config: Optional[Any] = None  # ChunkConfig if using RAG
     seed: int = 42
+    use_chain_of_thought: bool = True  # Use analysis field as <think> block
 
 
 # =============================================================================
@@ -146,32 +147,53 @@ class LocalJSONLoader:
         return filtered
     
     def _format_simple(self, item: dict) -> dict:
-        """Format item for simple (monolithic) training."""
-        system_prompt = self.config.system_prompt or DEFAULT_SIMPLE_SYSTEM_PROMPT
+        """Format item for simple (monolithic) training.
+        
+        DeepSeek-R1 style: No system prompt, instructions in user message.
+        Chain-of-Thought: analysis field wrapped in <think>...</think> tags.
+        """
+        user_prefix = self.config.user_prefix or DEFAULT_SIMPLE_USER_PREFIX
         
         question = item.get("question", "")
         answer = item.get("answer", "")
+        analysis = item.get("analysis", "")
         
+        # Build user content with prefix
+        user_content = f"{user_prefix}[Question:]\n{question}"
+        
+        # Build assistant response with optional Chain-of-Thought
+        if self.config.use_chain_of_thought and analysis:
+            # DeepSeek-R1 format: <think>reasoning</think>\n\nfinal_answer
+            assistant_content = f"<think>\n{analysis}\n</think>\n\n{answer}"
+        else:
+            assistant_content = answer
+        
+        # DeepSeek-R1: No system prompt
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-            {"role": "assistant", "content": answer},
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": assistant_content},
         ]
         
         return {
             "messages": messages,
             "question": question,
             "answer": answer,
+            "analysis": analysis,
             "language": item.get("language", ""),
             "intention_category": item.get("intention_category", ""),
         }
     
     def _format_rag(self, item: dict) -> dict:
-        """Format item for RAG training with document context."""
-        system_prompt = self.config.system_prompt or DEFAULT_RAG_SYSTEM_PROMPT
+        """Format item for RAG training with document context.
+        
+        DeepSeek-R1 style: No system prompt, instructions in user message.
+        Chain-of-Thought: analysis field wrapped in <think>...</think> tags.
+        """
+        user_prefix = self.config.user_prefix or DEFAULT_RAG_USER_PREFIX
         
         question = item.get("question", "")
         answer = item.get("answer", "")
+        analysis = item.get("analysis", "")
         evidence = item.get("evidence_snippet", "")
         file_path = item.get("file_path", "")
         
@@ -180,18 +202,27 @@ class LocalJSONLoader:
         if evidence:
             context = f"[Documents:]\n--- Document 1 ---\n{evidence}\n\n"
         
-        user_content = f"{context}[Question:]\n{question}"
+        # DeepSeek-R1 style: All instructions in user prompt
+        user_content = f"{user_prefix}{context}[Question:]\n{question}"
         
+        # Build assistant response with optional Chain-of-Thought
+        if self.config.use_chain_of_thought and analysis:
+            # DeepSeek-R1 format: <think>reasoning</think>\n\nfinal_answer
+            assistant_content = f"<think>\n{analysis}\n</think>\n\n{answer}"
+        else:
+            assistant_content = answer
+        
+        # DeepSeek-R1: No system prompt
         messages = [
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
-            {"role": "assistant", "content": answer},
+            {"role": "assistant", "content": assistant_content},
         ]
         
         return {
             "messages": messages,
             "question": question,
             "answer": answer,
+            "analysis": analysis,
             "evidence_snippet": evidence,
             "file_path": file_path,
             "language": item.get("language", ""),

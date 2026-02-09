@@ -52,7 +52,12 @@ dependencies:
     # Utilities
     - tqdm>=4.66.0
     - python-dotenv>=1.0.0
-    
+
+    # RAG & Embeddings
+    - sentence-transformers>=2.2.0
+    - faiss-cpu>=1.7.4
+    - chromadb>=0.4.0
+
     # Development (optional)
     - black>=24.0.0
     - ruff>=0.3.0

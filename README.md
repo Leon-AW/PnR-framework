@@ -321,38 +321,113 @@ model, tokenizer = llm.get_training_components()
 # {user_question}
 ```
 
+## RAG Chatbot Deployment
+
+Deploy trained RAG adapters as interactive chatbots with two options.
+
+> **Data Privacy**: All processing happens locally on your hardware. No data is sent to external APIs. Models are downloaded once from HuggingFace, then everything runs offline. See [docs/rag_chatbot.md](docs/rag_chatbot.md#data-privacy--offline-operation) for details.
+
+| Option | Use Case | Interface |
+|--------|----------|-----------|
+| **VanillaRAG** | Programmatic access, CLI testing | Python API / Terminal |
+| **OpenWebUI + llama.cpp** | End-user chat interface | Web UI |
+
+### Quick Start: VanillaRAG
+
+```python
+from src.inference import VanillaRAG, VanillaRAGConfig
+
+config = VanillaRAGConfig(
+    model_name="checkpoints/QM_rag/merged",
+    load_in_4bit=True,
+)
+rag = VanillaRAG(config)
+
+# Index QM documents
+rag.index_directory("src/data/documents/DE/LKR/", pattern="**/*.md")
+
+# Query
+result = rag.query("Wie ist der Ablauf bei der Mikrohärteprüfung?")
+print(result["answer"])
+```
+
+### Quick Start: OpenWebUI
+
+```bash
+# 1. Activate conda environment
+conda activate pnr
+
+# 2. Merge adapter and convert to GGUF (skip --skip-merge if not yet merged)
+./scripts/merge_and_convert.sh --skip-merge
+
+# 3. Start llama.cpp server
+./scripts/start_llama_server.sh
+
+# 4. Start OpenWebUI (new terminal)
+./scripts/setup_openwebui.sh
+
+# 5. Open http://localhost:3000
+#    - Create admin account
+#    - Upload documents to Workspace > Knowledge
+#    - Chat and reference docs with # (citations appear at bottom of responses)
+```
+
+### Key Features
+
+- **Structure-Aware Chunking**: Preserves tables, lists, and section hierarchies in QM documents
+- **Multilingual Embeddings**: German/English support via `paraphrase-multilingual-MiniLM-L12-v2`
+- **Flexible Storage**: FAISS (in-memory) or ChromaDB (persistent)
+- **Quantization Options**: q4_k_m (~10GB VRAM) to q8_0 (~16GB VRAM)
+- **RAG Citations**: OpenWebUI displays clickable source references with relevance scores
+- **HPC-Ready**: Apptainer (no Docker/sudo), conda-built llama.cpp
+
+**Full documentation**: [docs/rag_chatbot.md](docs/rag_chatbot.md)
+
 ## Project Structure
 
 ```
 PnR-framework/
 ├── src/
-│   ├── __init__.py         # Package init (v0.1.0)
-│   ├── data/
+│   ├── __init__.py              # Package init (v0.1.0)
+│   ├── data_loaders/
 │   │   ├── __init__.py
-│   │   ├── loader.py       # SituatedQA & CounterFact streaming loaders
-│   │   ├── local_loader.py # Local JSON dataset loader
-│   │   └── chunker.py      # Document chunking for RAG
+│   │   ├── local_loader.py      # Local JSON dataset loader
+│   │   ├── chunker.py           # Document chunking for RAG
+│   │   └── structure_aware_chunker.py  # QM-document aware chunking
+│   ├── inference/               # RAG chatbot deployment
+│   │   ├── __init__.py
+│   │   ├── vanilla_rag.py       # Standalone RAG pipeline
+│   │   ├── embeddings.py        # Embedding model wrapper
+│   │   ├── vector_store.py      # FAISS/ChromaDB backends
+│   │   ├── merge_adapter.py     # LoRA → merged model
+│   │   └── convert_to_gguf.py   # Merged → GGUF conversion
 │   ├── models/
 │   │   ├── __init__.py
-│   │   └── core.py         # PatchAndRouteLLM model manager
+│   │   └── core.py              # PatchAndRouteLLM model manager
 │   ├── training/
 │   │   ├── __init__.py
-│   │   └── trainer.py      # SFTTrainer for streaming datasets
+│   │   └── trainer.py           # SFTTrainer for streaming datasets
 │   └── utils/
 │       ├── __init__.py
-│       ├── config.py       # Configuration serialization (JSON)
-│       └── logging.py      # Centralized logging setup
-├── data/                   # Your datasets (create this)
-│   ├── *.json              # QA JSON files
-│   └── documents/          # Source documents for RAG
-├── train_base_adapter.py   # SituatedQA training
-├── train_monolithic_baseline.py  # Monolithic JSON training
-├── train_rag_baseline.py   # RAG baseline training
-├── environment.yml         # Conda environment (Python 3.11)
-├── requirements.txt        # Pip dependencies (fallback)
-├── pyproject.toml          # Project metadata and dependencies
-├── setup_blackwell_env.sh  # PyTorch Nightly setup for Blackwell
-└── run_training_slurm.sh   # SLURM submission script
+│       ├── config.py            # Configuration serialization (JSON)
+│       └── logging.py           # Centralized logging setup
+├── scripts/                     # Deployment scripts
+│   ├── start_llama_server.sh    # llama.cpp server launcher
+│   ├── setup_openwebui.sh       # OpenWebUI Docker setup
+│   └── merge_and_convert.sh     # Full adapter → GGUF pipeline
+├── docs/
+│   └── rag_chatbot.md           # RAG chatbot documentation
+├── data/                        # Your datasets (create this)
+│   ├── *.json                   # QA JSON files
+│   └── documents/               # Source documents for RAG
+├── train_base_adapter.py        # SituatedQA training
+├── train_monolithic_baseline.py # Monolithic JSON training
+├── train_rag_baseline.py        # RAG baseline training
+├── environment.yml              # Conda environment (Python 3.11)
+├── requirements.txt             # Pip dependencies (fallback)
+├── pyproject.toml               # Project metadata and dependencies
+├── setup_blackwell_env.sh       # PyTorch Nightly setup for Blackwell
+└── run_training_slurm.sh        # SLURM submission script
 ```
 
 ## Key Features
@@ -520,6 +595,55 @@ noise = chunker.get_noise_chunks(all_chunks, exclude=[relevant], n=2)
 context = chunker.build_context(relevant, noise, shuffle=True)
 ```
 
+#### `StructureAwareChunker`
+Structure-preserving chunker for QM documents (tables, lists, headers).
+
+```python
+from src.data_loaders import StructureAwareChunker, StructuredChunkConfig
+
+config = StructuredChunkConfig(
+    max_chunk_tokens=750,
+    table_max_tokens=1500,  # Keep tables atomic
+    list_max_tokens=500,    # Keep lists together
+    include_breadcrumb=True,
+    include_path=True,
+)
+chunker = StructureAwareChunker(config)
+
+chunks = chunker.chunk_document("path/to/qm_doc.md")
+
+for chunk in chunks:
+    print(f"[{chunk.content_type}] {chunk.section_breadcrumb}")
+    print(chunk.format_with_context())
+```
+
+#### `VanillaRAG`
+Standalone RAG pipeline for document Q&A.
+
+```python
+from src.inference import VanillaRAG, VanillaRAGConfig
+
+config = VanillaRAGConfig(
+    model_name="checkpoints/QM_rag/merged",
+    embedding_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    vector_store_type="faiss",
+    top_k=5,
+    load_in_4bit=True,
+)
+rag = VanillaRAG(config)
+
+# Index documents
+rag.index_directory("data/documents/", pattern="**/*.md")
+
+# Query with RAG
+result = rag.query("What is the procedure for hardness testing?")
+print(result["answer"])
+print(result["sources"])
+
+# Interactive REPL
+rag.interactive_session()
+```
+
 #### `PatchAndRouteTrainer`
 Training engine with SFTTrainer wrapper.
 
@@ -603,6 +727,11 @@ Full options: `python train_base_adapter.py --help`
 - **datasets** >= 2.18.0
 - **bitsandbytes** >= 0.43.0
 - **accelerate** >= 0.28.0
+
+### RAG & Embeddings
+- **sentence-transformers** >= 2.2.0
+- **faiss-cpu** >= 1.7.4
+- **chromadb** >= 0.4.0
 
 ### Development
 - **black** >= 24.0.0

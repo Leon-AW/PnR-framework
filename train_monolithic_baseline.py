@@ -163,8 +163,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max_seq_length",
         type=int,
-        default=1024,  # Reduced for 14B models on 24GB GPU
-        help="Maximum sequence length",
+        default=4096,  # Increased for Chain-of-Thought (analysis field can be long)
+        help="Maximum sequence length (use 4096+ for CoT to avoid truncation)",
     )
 
     # Output configuration
@@ -200,6 +200,13 @@ def parse_args() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
         help="Logging verbosity",
+    )
+    
+    # Chain-of-Thought (DeepSeek-R1)
+    parser.add_argument(
+        "--no_chain_of_thought",
+        action="store_true",
+        help="Disable Chain-of-Thought training (omit <think> blocks from analysis field)",
     )
 
     return parser.parse_args()
@@ -309,8 +316,9 @@ def main() -> None:
         include_negatives=include_negatives,
         validation_split=args.validation_split,
         language_filter=args.language_filter,
-        system_prompt=args.system_prompt,
+        user_prefix=args.system_prompt,  # DeepSeek-R1: No system prompt, use as user prefix
         seed=args.seed,
+        use_chain_of_thought=not args.no_chain_of_thought,  # Enable CoT by default
     )
 
     data_loader = LocalJSONLoader(config=data_config)

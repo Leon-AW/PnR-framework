@@ -86,8 +86,13 @@ class TrainingConfig:
     
     # Logging and saving
     logging_steps: int = 10
-    save_steps: int = 100
-    save_total_limit: int = 3
+    save_steps: int = 50
+    eval_steps: int = 50  # Evaluate every N steps to track generalization
+    eval_strategy: str = "steps"
+    save_total_limit: int = 5
+    load_best_model_at_end: bool = True  # Auto-select best checkpoint by eval loss
+    metric_for_best_model: str = "eval_loss"
+    greater_is_better: bool = False
     
     # Precision (auto-configured based on hardware)
     fp16: bool = False
@@ -110,6 +115,9 @@ class TrainingConfig:
     
     # Streaming-specific
     dataset_buffer_size: int = 10_000  # Shuffle buffer for streaming
+    
+    # Regularization (Generalization)
+    neftune_noise_alpha: float | None = 5.0  # NEFTune noise for better generalization
     
     def __post_init__(self):
         """Auto-configure precision based on hardware capabilities."""
@@ -163,6 +171,7 @@ class TrainingConfig:
             output_dir=self.output_dir,
             max_steps=self.max_steps,
             per_device_train_batch_size=self.per_device_train_batch_size,
+            per_device_eval_batch_size=self.per_device_train_batch_size,  # Must match train BS to avoid OOM during eval
             gradient_accumulation_steps=self.gradient_accumulation_steps,
             learning_rate=self.learning_rate,
             lr_scheduler_type=self.lr_scheduler_type,
@@ -171,6 +180,11 @@ class TrainingConfig:
             logging_steps=self.logging_steps,
             save_steps=self.save_steps,
             save_total_limit=self.save_total_limit,
+            eval_steps=self.eval_steps,
+            eval_strategy=self.eval_strategy,
+            load_best_model_at_end=self.load_best_model_at_end,
+            metric_for_best_model=self.metric_for_best_model,
+            greater_is_better=self.greater_is_better,
             fp16=self.fp16,
             bf16=self.bf16,
             gradient_checkpointing=self.gradient_checkpointing,
@@ -186,6 +200,7 @@ class TrainingConfig:
             max_length=self.max_seq_length,  # TRL 0.27+ renamed max_seq_length to max_length
             packing=False,  # Disable packing for chat format
             dataset_text_field=None,  # We use formatting_func instead
+            neftune_noise_alpha=self.neftune_noise_alpha,  # Inject noise into embeddings
         )
 
 
@@ -284,30 +299,39 @@ class PatchAndRouteTrainer:
                 "Set tokenizer.pad_token = tokenizer.eos_token"
             )
         
-        # Check chat template
+        # Override chat template for training.
+        # IMPORTANT: The stock DeepSeek-R1 tokenizer template strips <think>
+        # blocks from assistant messages (designed for multi-turn inference).
+        # During training we MUST preserve <think> blocks so the model learns
+        # the Chain-of-Thought pattern. Always use this training-safe template.
+        _TRAINING_CHAT_TEMPLATE = (
+            "{{ bos_token }}"
+            "{% if messages[0]['role'] == 'system' %}"
+            "{{ messages[0]['content'] }}"
+            "{% set loop_messages = messages[1:] %}"
+            "{% else %}"
+            "{% set loop_messages = messages %}"
+            "{% endif %}"
+            "{% for message in loop_messages %}"
+            "{% if message['role'] == 'user' %}"
+            "<｜User｜>{{ message['content'] }}"
+            "{% elif message['role'] == 'assistant' %}"
+            "<｜Assistant｜>{{ message['content'] }}<｜end▁of▁sentence｜>"
+            "{% endif %}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}<｜Assistant｜>{% endif %}"
+        )
         if self.tokenizer.chat_template is None:
             logger.warning(
                 "Tokenizer has no chat_template. "
-                "Using default DeepSeek-R1 template."
+                "Setting training-safe DeepSeek-R1 template."
             )
-            # DeepSeek-R1 chat template
-            self.tokenizer.chat_template = (
-                "{{ bos_token }}"
-                "{% if messages[0]['role'] == 'system' %}"
-                "{{ messages[0]['content'] }}"
-                "{% set loop_messages = messages[1:] %}"
-                "{% else %}"
-                "{% set loop_messages = messages %}"
-                "{% endif %}"
-                "{% for message in loop_messages %}"
-                "{% if message['role'] == 'user' %}"
-                "<｜User｜>{{ message['content'] }}"
-                "{% elif message['role'] == 'assistant' %}"
-                "<｜Assistant｜>{{ message['content'] }}"
-                "{% endif %}"
-                "{% endfor %}"
-                "{% if add_generation_prompt %}<｜Assistant｜>{% endif %}"
+        else:
+            logger.info(
+                "Overriding tokenizer chat_template with training-safe "
+                "template (preserves <think> blocks)."
             )
+        self.tokenizer.chat_template = _TRAINING_CHAT_TEMPLATE
         
         logger.info("✓ Tokenizer validated")
     
