@@ -59,34 +59,30 @@ echo ""
 echo "Starting training..."
 echo "=============================================="
 
-# Optimized training pipeline for DeepSeek-R1 CoT:
+# Training pipeline v3 for DeepSeek-R1 CoT:
 #
-# Key changes from previous run:
-# - lora_r=16, lora_alpha=32 — max for 24GB GPU with 7 target modules
-#   (r=32 and r=64 both OOM on 24GB)
-# - learning_rate=1e-4 (was 2e-4) — less aggressive, better generalization
-# - max_steps=1500 (was 700) — ~7 epochs, eval picks best checkpoint
-# - save_steps=50 — more checkpoints for best-model selection
-# - eval via TrainingConfig: eval_steps=50, load_best_model_at_end=True
-# - Chat template bug FIXED: <think> blocks now preserved during training
-# - max_seq_length=2048 (was 4096) — fits 97% of samples WITH CoT preserved
-#   (median=714, P99=2418, max=3599; 4096 OOMs because CoT makes sequences
-#    ~400 tokens longer per sample)
+# Changes from v2:
+# - learning_rate=2e-4 (was 1e-4) — original rate
+# - validation_split=0.08 (was 0.1) — 8% validation
+# - max_seq_length=2048 — fits 97% of samples WITH CoT preserved
+# - Chat template bug FIXED: <think> blocks preserved during training
+# - load_best_model_at_end selects best checkpoint by eval_loss
 #
 python train_rag_baseline.py \
     --data_path src/data/dataset_final.json \
     --docs_path src/data/documents/DE \
-    --adapter_name QM_rag_cot_v2 \
+    --adapter_name QM_rag_cot_v3 \
     --output_dir checkpoints/ \
     --target_devices 0 \
     --batch_size 1 \
     --gradient_accumulation 16 \
-    --max_seq_length 4096 \
+    --max_seq_length 2048 \
     --max_steps 1500 \
     --save_steps 50 \
-    --learning_rate 1e-4 \
+    --learning_rate 2e-4 \
     --lora_r 16 \
     --lora_alpha 32 \
+    --validation_split 0.08 \
     --quantization int4
 
 echo ""

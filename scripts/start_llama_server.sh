@@ -24,7 +24,7 @@ if [[ -n "$CONDA_PREFIX" ]]; then
 fi
 
 # Default configuration
-MODEL="${MODEL:-checkpoints/QM_rag_cot_v2/gguf/merged-q5_k_m.gguf}"
+MODEL="${MODEL:-checkpoints/QM_rag_cot_v3/gguf/merged-q4_k_m.gguf}"
 PORT="${PORT:-8080}"
 CTX_SIZE="${CTX_SIZE:-49152}"
 N_GPU_LAYERS="${N_GPU_LAYERS:-35}"
@@ -69,7 +69,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --model, -m PATH       Path to GGUF model (default: checkpoints/QM_rag_cot_v2/gguf/merged-q5_k_m.gguf)"
+            echo "  --model, -m PATH       Path to GGUF model (default: checkpoints/QM_rag_cot_v3/gguf/merged-q4_k_m.gguf)"
             echo "  --port, -p PORT        Server port (default: 8080)"
             echo "  --ctx-size, -c SIZE    Context size (default: 49152)"
             echo "  --n-gpu-layers, -ngl N Number of GPU layers (default: 35)"
