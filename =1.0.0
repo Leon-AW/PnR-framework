@@ -1,0 +1,6 @@
+Collecting simplemma
+  Downloading simplemma-1.1.2-py3-none-any.whl.metadata (23 kB)
+Downloading simplemma-1.1.2-py3-none-any.whl (67.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 67.2/67.2 MB 37.5 MB/s  0:00:01
+Installing collected packages: simplemma
+Successfully installed simplemma-1.1.2

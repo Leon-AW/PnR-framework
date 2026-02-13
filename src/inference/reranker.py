@@ -86,6 +86,7 @@ class Reranker:
         query: str,
         candidates: list[SearchResult],
         top_k: Optional[int] = None,
+        min_score: Optional[float] = None,
     ) -> list[SearchResult]:
         """Rerank candidates using cross-encoder scores.
 
@@ -93,6 +94,7 @@ class Reranker:
             query: The search query
             candidates: List of retrieval candidates
             top_k: Number of results to return (default: all)
+            min_score: Minimum relevance score threshold (default: no filtering)
 
         Returns:
             Reranked list of SearchResult objects with updated scores
@@ -124,6 +126,10 @@ class Reranker:
 
         # Sort by score descending
         scored.sort(key=lambda x: x.score, reverse=True)
+
+        # Apply minimum score threshold before top_k truncation
+        if min_score is not None:
+            scored = [r for r in scored if r.score >= min_score]
 
         if top_k is not None:
             scored = scored[:top_k]

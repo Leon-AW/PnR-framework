@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import httpx
+
 from src.inference.bm25_store import BM25Store
 from src.inference.embeddings import EmbeddingConfig, EmbeddingModel
 from src.inference.rag_config import RAGServerConfig
@@ -244,6 +246,7 @@ class QueryPipeline:
                 else 0
             ),
             "reranking_enabled": self.config.enable_reranking,
+            "hyde_enabled": self.config.enable_hyde,
         }
 
     # -------------------------------------------------------------------------
@@ -383,34 +386,133 @@ class QueryPipeline:
         return f"{last_user_msg} {user_message}"
 
     # -------------------------------------------------------------------------
+    # HyDE (Hypothetical Document Embeddings)
+    # -------------------------------------------------------------------------
+
+    def _generate_hyde_document(
+        self, query: str, language: str, data_source: str
+    ) -> str:
+        """Generate a hypothetical document for HyDE-enhanced retrieval.
+
+        Sends a synchronous request to llama.cpp to generate a short
+        hypothetical answer, which is then embedded for FAISS search.
+
+        Args:
+            query: User query
+            language: Detected language ("de" or "en")
+            data_source: Active data source name
+
+        Returns:
+            Hypothetical document text, or empty string on failure
+        """
+        if language == "de":
+            system_msg = (
+                "Beantworte die folgende Frage zum Qualitätsmanagement "
+                f"({data_source.upper()}) kurz und faktenbasiert. "
+                "Antworte in 2-3 Sätzen."
+            )
+        else:
+            system_msg = (
+                "Answer the following quality management question "
+                f"({data_source.upper()}) briefly and factually. "
+                "Respond in 2-3 sentences."
+            )
+
+        try:
+            response = httpx.post(
+                f"{self.config.llama_url}/v1/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": query},
+                    ],
+                    "max_tokens": self.config.hyde_max_tokens,
+                    "temperature": self.config.hyde_temperature,
+                    "stream": False,
+                },
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            hyde_text = data["choices"][0]["message"]["content"]
+            # Strip any <think>...</think> blocks from HyDE output
+            hyde_text = re.sub(r"<think>.*?</think>", "", hyde_text, flags=re.DOTALL).strip()
+            logger.debug(f"HyDE document ({len(hyde_text)} chars): {hyde_text[:100]}...")
+            return hyde_text
+        except Exception as e:
+            logger.warning(f"HyDE generation failed (falling back to normal retrieval): {e}")
+            return ""
+
+    # -------------------------------------------------------------------------
     # Hybrid Retrieval
     # -------------------------------------------------------------------------
 
     def hybrid_retrieve(
-        self, query: str, data_source: str
+        self, query: str, data_source: str, language: str = "de"
     ) -> list[SearchResult]:
         """Perform hybrid retrieval: FAISS dense + BM25 sparse with RRF fusion.
+
+        When HyDE is enabled, generates a hypothetical document and uses its
+        embedding as an additional FAISS query vector. Results from both
+        query vectors are merged (best score per ID) before RRF fusion.
 
         Args:
             query: Search query (potentially reformulated)
             data_source: Data source name
+            language: Detected query language
 
         Returns:
             Fused and deduplicated list of SearchResult objects
         """
         faiss_store, bm25_store = self._source_manager.get_stores(data_source)
 
-        # Dense retrieval (FAISS)
+        # Dense retrieval (FAISS) with original query
         query_embedding = self._embedding_model.encode(query)
         dense_results = faiss_store.search(
             query_embedding, k=self.config.dense_top_k
         )
+
+        # HyDE: generate hypothetical document and merge FAISS results
+        if self.config.enable_hyde:
+            hyde_doc = self._generate_hyde_document(query, language, data_source)
+            if hyde_doc:
+                hyde_embedding = self._embedding_model.encode(hyde_doc)
+                hyde_results = faiss_store.search(
+                    hyde_embedding, k=self.config.dense_top_k
+                )
+                dense_results = self._merge_dense_results(dense_results, hyde_results)
+                logger.info(
+                    f"HyDE: merged {len(dense_results)} unique dense results"
+                )
 
         # Sparse retrieval (BM25)
         sparse_results = bm25_store.search(query, k=self.config.sparse_top_k)
 
         # Reciprocal Rank Fusion (RRF)
         return self._rrf_fuse(dense_results, sparse_results)
+
+    @staticmethod
+    def _merge_dense_results(
+        results_a: list[SearchResult], results_b: list[SearchResult]
+    ) -> list[SearchResult]:
+        """Merge two FAISS result lists, keeping the best score per ID.
+
+        Args:
+            results_a: First result list (original query)
+            results_b: Second result list (HyDE query)
+
+        Returns:
+            Deduplicated results sorted by score descending
+        """
+        best: dict[str, SearchResult] = {}
+        for result in results_a:
+            if result.id not in best or result.score > best[result.id].score:
+                best[result.id] = result
+        for result in results_b:
+            if result.id not in best or result.score > best[result.id].score:
+                best[result.id] = result
+        merged = sorted(best.values(), key=lambda r: r.score, reverse=True)
+        return merged
 
     def _rrf_fuse(
         self,
@@ -478,7 +580,10 @@ class QueryPipeline:
             return candidates[: self.config.rerank_top_k]
 
         return self._reranker.rerank(
-            query, candidates, top_k=self.config.rerank_top_k
+            query,
+            candidates,
+            top_k=self.config.rerank_top_k,
+            min_score=self.config.reranker_min_score,
         )
 
     # -------------------------------------------------------------------------
@@ -691,7 +796,7 @@ class QueryPipeline:
 
         # 4. Hybrid retrieval
         candidates = self.hybrid_retrieve(
-            analysis.reformulated_query, analysis.data_source
+            analysis.reformulated_query, analysis.data_source, analysis.language
         )
         logger.info(f"Hybrid retrieval: {len(candidates)} candidates")
 

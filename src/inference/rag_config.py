@@ -83,6 +83,14 @@ class RAGServerConfig:
     enable_think_stripping: bool = True
     enable_citations: bool = True
 
+    # HyDE (Hypothetical Document Embeddings)
+    enable_hyde: bool = True
+    hyde_max_tokens: int = 150
+    hyde_temperature: float = 0.3
+
+    # Reranker relevance threshold
+    reranker_min_score: float = 0.1
+
     # Intranet link mapping
     intranet_links_path: str = "./qm_vectorstore_advanced/intranet_links.json"
 
@@ -120,6 +128,10 @@ class RAGServerConfig:
             enable_reranking=os.environ.get("RAG_ENABLE_RERANKING", "true").lower() == "true",
             enable_think_stripping=os.environ.get("RAG_ENABLE_THINK_STRIPPING", "true").lower() == "true",
             enable_citations=os.environ.get("RAG_ENABLE_CITATIONS", "true").lower() == "true",
+            enable_hyde=os.environ.get("RAG_ENABLE_HYDE", "true").lower() == "true",
+            hyde_max_tokens=int(os.environ.get("RAG_HYDE_MAX_TOKENS", cls.hyde_max_tokens)),
+            hyde_temperature=float(os.environ.get("RAG_HYDE_TEMPERATURE", cls.hyde_temperature)),
+            reranker_min_score=float(os.environ.get("RAG_RERANKER_MIN_SCORE", cls.reranker_min_score)),
             intranet_links_path=os.environ.get("RAG_INTRANET_LINKS_PATH", cls.intranet_links_path),
             default_data_source=os.environ.get("RAG_DEFAULT_DATA_SOURCE", cls.default_data_source),
             log_level=os.environ.get("RAG_LOG_LEVEL", cls.log_level),

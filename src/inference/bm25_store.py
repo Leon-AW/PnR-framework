@@ -19,6 +19,15 @@ from src.inference.vector_store import SearchResult
 
 logger = logging.getLogger(__name__)
 
+# Try to import simplemma for German lemmatization
+try:
+    import simplemma
+    _HAS_SIMPLEMMA = True
+    logger.debug("simplemma available — German lemmatization enabled")
+except ImportError:
+    _HAS_SIMPLEMMA = False
+    logger.debug("simplemma not available — skipping lemmatization")
+
 # German stop words (common function words)
 GERMAN_STOP_WORDS = frozenset({
     "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem",
@@ -62,10 +71,13 @@ def _tokenize(text: str) -> list[str]:
     """Tokenize text with German-aware processing.
 
     Lowercases, splits on non-alphanumeric (keeping umlauts/sharp-s),
-    and removes stop words.
+    removes stop words, and applies lemmatization (if simplemma is available).
     """
     tokens = _TOKEN_PATTERN.findall(text.lower())
-    return [t for t in tokens if t not in GERMAN_STOP_WORDS and len(t) > 1]
+    filtered = [t for t in tokens if t not in GERMAN_STOP_WORDS and len(t) > 1]
+    if _HAS_SIMPLEMMA:
+        return [simplemma.lemmatize(t, lang="de").lower() for t in filtered]
+    return filtered
 
 
 @dataclass

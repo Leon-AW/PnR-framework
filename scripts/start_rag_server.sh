@@ -78,6 +78,8 @@ while [[ $# -gt 0 ]]; do
             echo "Environment variables:"
             echo "  RAG_PORT, RAG_LLAMA_URL, RAG_LOG_LEVEL, RAG_INDEX_BASE_DIR"
             echo "  RAG_ENABLE_RERANKING, RAG_ENABLE_CITATIONS, RAG_RERANK_TOP_K"
+            echo "  RAG_ENABLE_HYDE, RAG_HYDE_MAX_TOKENS, RAG_HYDE_TEMPERATURE"
+            echo "  RAG_RERANKER_MIN_SCORE"
             echo ""
             echo "Prerequisites:"
             echo "  1. Build indices: python scripts/index_documents_advanced.py --source all"
