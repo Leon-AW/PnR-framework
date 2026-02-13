@@ -18,9 +18,17 @@
 
 set -e
 
-# Ensure conda libraries are available (llama.cpp was built against conda's libstdc++)
+# Ensure CUDA and C++ libraries are available for llama.cpp
 if [[ -n "$CONDA_PREFIX" ]]; then
     export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+    # pip-installed nvidia packages store CUDA libs under site-packages/nvidia/*/lib/
+    NVIDIA_SITE_PKGS="$CONDA_PREFIX/lib/python3.11/site-packages/nvidia"
+    if [[ -d "$NVIDIA_SITE_PKGS" ]]; then
+        for nvidia_lib_dir in "$NVIDIA_SITE_PKGS"/*/lib; do
+            [[ -d "$nvidia_lib_dir" ]] && export LD_LIBRARY_PATH="$nvidia_lib_dir:$LD_LIBRARY_PATH"
+        done
+    fi
 fi
 
 # Default configuration
@@ -33,6 +41,8 @@ N_GPU_LAYERS="${N_GPU_LAYERS:-35}"
 HOST="${LLAMA_HOST:-0.0.0.0}"
 THREADS="${THREADS:-8}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
+REPEAT_PENALTY="${REPEAT_PENALTY:-1.1}"
+REPEAT_LAST_N="${REPEAT_LAST_N:-256}"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -141,6 +151,7 @@ echo "GPU Layers:    $N_GPU_LAYERS"
 echo "Host:          $HOST"
 echo "Threads:       $THREADS"
 echo "Batch Size:    $BATCH_SIZE"
+echo "Repeat Pen.:   $REPEAT_PENALTY (last $REPEAT_LAST_N tokens)"
 echo "Chat Template: $CHAT_TEMPLATE"
 echo "=============================================="
 echo ""
@@ -167,6 +178,8 @@ exec "$LLAMA_SERVER" \
     --n-gpu-layers "$N_GPU_LAYERS" \
     --threads "$THREADS" \
     --batch-size "$BATCH_SIZE" \
+    --repeat-penalty "$REPEAT_PENALTY" \
+    --repeat-last-n "$REPEAT_LAST_N" \
     --parallel 2 \
     --cont-batching \
     $TEMPLATE_ARGS

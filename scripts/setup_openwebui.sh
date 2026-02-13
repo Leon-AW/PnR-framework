@@ -7,14 +7,17 @@
 # configured to use the llama.cpp server as a backend.
 #
 # Usage:
-#   ./scripts/setup_openwebui.sh                   # Start
-#   ./scripts/setup_openwebui.sh --stop             # Stop
-#   ./scripts/setup_openwebui.sh --status           # Check status
-#   ./scripts/setup_openwebui.sh --llama-port 8080  # Custom llama port
+#   ./scripts/setup_openwebui.sh                           # Start (advanced-rag mode)
+#   ./scripts/setup_openwebui.sh --mode advanced-rag       # Use external RAG server
+#   ./scripts/setup_openwebui.sh --mode builtin-rag        # Use OpenWebUI's built-in RAG
+#   ./scripts/setup_openwebui.sh --stop                    # Stop
+#   ./scripts/setup_openwebui.sh --status                  # Check status
+#   ./scripts/setup_openwebui.sh --llama-port 8080         # Custom llama port
 #
 # Requirements:
 #   - Apptainer or Singularity installed (no sudo needed)
-#   - llama.cpp server running (start with start_llama_server.sh)
+#   - For builtin-rag: llama.cpp server running
+#   - For advanced-rag: RAG server running (start_rag_server.sh) + llama.cpp
 #
 # =============================================================================
 
@@ -23,6 +26,8 @@ set -e
 # Default configuration
 WEBUI_PORT="${WEBUI_PORT:-3000}"
 LLAMA_PORT="${LLAMA_PORT:-8080}"
+RAG_PORT="${RAG_PORT:-8000}"
+RAG_MODE="${RAG_MODE:-advanced-rag}"  # "advanced-rag" or "builtin-rag"
 DATA_DIR="${DATA_DIR:-$HOME/.openwebui}"
 SIF_DIR="${SIF_DIR:-$HOME/.openwebui/images}"
 SIF_FILE="$SIF_DIR/openwebui.sif"
@@ -90,6 +95,14 @@ while [[ $# -gt 0 ]]; do
             DATA_DIR="$2"
             shift 2
             ;;
+        --mode)
+            RAG_MODE="$2"
+            shift 2
+            ;;
+        --rag-port)
+            RAG_PORT="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -103,8 +116,16 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --webui-port N   OpenWebUI port (default: 3000)"
             echo "  --llama-port N   llama.cpp server port (default: 8080)"
+            echo "  --rag-port N     RAG server port (default: 8000)"
+            echo "  --mode MODE      RAG mode: advanced-rag or builtin-rag (default: advanced-rag)"
             echo "  --data-dir DIR   Data directory (default: ~/.openwebui)"
             echo "  --help, -h       Show this help"
+            echo ""
+            echo "Modes:"
+            echo "  advanced-rag   OpenWebUI → RAG Server (port $RAG_PORT) → llama.cpp (port $LLAMA_PORT)"
+            echo "                 Requires: start_rag_server.sh + start_llama_server.sh"
+            echo "  builtin-rag    OpenWebUI → llama.cpp directly (OpenWebUI handles RAG)"
+            echo "                 Requires: start_llama_server.sh"
             echo ""
             echo "Runtime: $CONTAINER_CMD"
             exit 0
@@ -215,17 +236,42 @@ if [[ ! -f "$SIF_FILE" ]] || [[ "$REBUILD_IMAGE" == "true" ]]; then
     echo ""
 fi
 
+# Validate mode
+if [[ "$RAG_MODE" != "advanced-rag" && "$RAG_MODE" != "builtin-rag" ]]; then
+    echo "Error: Unknown mode '$RAG_MODE'. Use 'advanced-rag' or 'builtin-rag'."
+    exit 1
+fi
+
+# Configure based on mode
+if [[ "$RAG_MODE" == "advanced-rag" ]]; then
+    # advanced-rag: OpenWebUI → RAG Server → llama.cpp
+    # RAG server handles retrieval, so we disable OpenWebUI's built-in RAG
+    OPENAI_BASE_URL="http://localhost:$RAG_PORT/v1"
+    MODE_LABEL="Advanced RAG (external server on port $RAG_PORT)"
+else
+    # builtin-rag: OpenWebUI → llama.cpp directly (OpenWebUI does RAG)
+    OPENAI_BASE_URL="http://localhost:$LLAMA_PORT/v1"
+    MODE_LABEL="Built-in RAG (OpenWebUI handles retrieval)"
+fi
+
 echo "=============================================="
 echo "Starting OpenWebUI ($CONTAINER_CMD)"
 echo "=============================================="
+echo "Mode:             $MODE_LABEL"
 echo "WebUI Port:       $WEBUI_PORT"
+if [[ "$RAG_MODE" == "advanced-rag" ]]; then
+echo "RAG Server Port:  $RAG_PORT"
+fi
 echo "llama.cpp Port:   $LLAMA_PORT"
+echo "API Base URL:     $OPENAI_BASE_URL"
 echo "Data Directory:   $DATA_DIR"
 echo "SIF Image:        $SIF_FILE"
+if [[ "$RAG_MODE" == "builtin-rag" ]]; then
 echo "Embedding Model:  $EMBEDDING_MODEL"
 echo "Reranking Model:  $RERANKING_MODEL"
 echo "Hybrid Search:    enabled"
 echo "RAG Top-K:        $RAG_TOP_K"
+fi
 echo "Log File:         $LOG_FILE"
 echo "=============================================="
 
@@ -234,28 +280,42 @@ echo "=============================================="
 # - No port mapping needed (the app listens directly on host ports)
 # - llama.cpp server is reachable at localhost
 # Note: We use --pwd to set the working directory since start.sh expects to be in /app/backend
+
+# Build environment variable arguments based on mode
+ENV_ARGS=(
+    --env "PORT=$WEBUI_PORT"
+    --env "HOST=0.0.0.0"
+    --env "OPENAI_API_BASE_URL=$OPENAI_BASE_URL"
+    --env "OPENAI_API_KEY=not-needed"
+    --env "ENABLE_RAG_WEB_SEARCH=false"
+    --env "DEFAULT_MODELS=llama.cpp"
+    --env "ANONYMIZED_TELEMETRY=false"
+    --env "SCARF_NO_ANALYTICS=true"
+    --env "DO_NOT_TRACK=true"
+    --env "ENABLE_OLLAMA_API=false"
+)
+
+if [[ "$RAG_MODE" == "builtin-rag" ]]; then
+    # Built-in RAG: configure OpenWebUI's RAG settings
+    ENV_ARGS+=(
+        --env "RAG_EMBEDDING_MODEL=$EMBEDDING_MODEL"
+        --env "RAG_EMBEDDING_ENGINE="
+        --env "RAG_RERANKING_MODEL=$RERANKING_MODEL"
+        --env "RAG_RERANKING_ENGINE="
+        --env "RAG_CHUNK_SIZE=$CHUNK_SIZE"
+        --env "RAG_CHUNK_OVERLAP=$CHUNK_OVERLAP"
+        --env "RAG_TOP_K=$RAG_TOP_K"
+        --env "RAG_RELEVANCE_THRESHOLD=$RAG_RELEVANCE_THRESHOLD"
+        --env "ENABLE_RAG_HYBRID_SEARCH=true"
+    )
+fi
+# Note: In advanced-rag mode we omit OpenWebUI RAG env vars since our
+# external RAG server handles retrieval, embedding, and reranking.
+
 nohup $CONTAINER_CMD run \
     --pwd /app/backend \
     --bind "$DATA_DIR:/app/backend/data" \
-    --env "PORT=$WEBUI_PORT" \
-    --env "HOST=0.0.0.0" \
-    --env "OPENAI_API_BASE_URL=http://localhost:$LLAMA_PORT/v1" \
-    --env "OPENAI_API_KEY=not-needed" \
-    --env "RAG_EMBEDDING_MODEL=$EMBEDDING_MODEL" \
-    --env "RAG_EMBEDDING_ENGINE=" \
-    --env "RAG_RERANKING_MODEL=$RERANKING_MODEL" \
-    --env "RAG_RERANKING_ENGINE=" \
-    --env "RAG_CHUNK_SIZE=$CHUNK_SIZE" \
-    --env "RAG_CHUNK_OVERLAP=$CHUNK_OVERLAP" \
-    --env "RAG_TOP_K=$RAG_TOP_K" \
-    --env "RAG_RELEVANCE_THRESHOLD=$RAG_RELEVANCE_THRESHOLD" \
-    --env "ENABLE_RAG_HYBRID_SEARCH=true" \
-    --env "ENABLE_RAG_WEB_SEARCH=false" \
-    --env "DEFAULT_MODELS=llama.cpp" \
-    --env "ANONYMIZED_TELEMETRY=false" \
-    --env "SCARF_NO_ANALYTICS=true" \
-    --env "DO_NOT_TRACK=true" \
-    --env "ENABLE_OLLAMA_API=false" \
+    "${ENV_ARGS[@]}" \
     --writable-tmpfs \
     "$SIF_FILE" \
     > "$LOG_FILE" 2>&1 &
@@ -294,14 +354,27 @@ if [[ "$READY" == "true" ]]; then
     echo "OpenWebUI is ready!"
     echo "=============================================="
     echo ""
+    echo "Mode:             $MODE_LABEL"
     echo "Access:           http://localhost:$WEBUI_PORT"
     echo ""
     echo "First-time setup:"
     echo "  1. Create an admin account at http://localhost:$WEBUI_PORT"
     echo "  2. Go to Admin Panel > Settings > Connections"
-    echo "  3. Verify OpenAI API connection to llama.cpp server"
+    echo "  3. Verify OpenAI API connection"
     echo ""
-    echo "RAG Configuration (pre-configured via env vars):"
+    if [[ "$RAG_MODE" == "advanced-rag" ]]; then
+    echo "Advanced RAG Mode:"
+    echo "  - Retrieval handled by external RAG server (port $RAG_PORT)"
+    echo "  - Hybrid search: FAISS + BM25 with RRF fusion"
+    echo "  - Cross-encoder reranking for precision"
+    echo "  - Automatic data source routing (AIT/LKR)"
+    echo "  - Citations appended to responses"
+    echo "  - No document upload needed (pre-indexed)"
+    echo ""
+    echo "  To switch to built-in RAG:"
+    echo "    ./scripts/setup_openwebui.sh --restart --mode builtin-rag"
+    else
+    echo "Built-in RAG Configuration (pre-configured via env vars):"
     echo "  - Chunk Size: $CHUNK_SIZE"
     echo "  - Chunk Overlap: $CHUNK_OVERLAP"
     echo "  - Hybrid Search: enabled (BM25 + Embedding)"
@@ -315,6 +388,10 @@ if [[ "$READY" == "true" ]]; then
     echo "  3. Upload your QM PDF/MD files"
     echo "  4. In chat, use # to reference a document or collection"
     echo "  5. Citations appear as clickable references below responses"
+    echo ""
+    echo "  To switch to advanced RAG:"
+    echo "    ./scripts/setup_openwebui.sh --restart --mode advanced-rag"
+    fi
 else
     echo "Warning: OpenWebUI did not respond within 120 seconds."
     echo "It may still be starting. Check logs:"
