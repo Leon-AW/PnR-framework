@@ -50,7 +50,7 @@ class VanillaRAGConfig:
     chunk_max_tokens: int = 750
     top_k: int = 5
     max_new_tokens: int = 512
-    temperature: float = 0.7
+    temperature: float = 0.6
     device: Optional[str] = None
     load_in_4bit: bool = False
     load_in_8bit: bool = False
