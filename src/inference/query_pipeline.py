@@ -81,6 +81,14 @@ _AIT_INDICATORS = re.compile(
     re.IGNORECASE,
 )
 
+# Anaphoric references — used for data-source routing and query contextualization.
+# "das" only counts when NOT followed by an uppercase word (→ article, not pronoun).
+# "es" is excluded entirely (too many false positives: "es gibt", "es ist", …).
+_ANAPHORA_PATTERN = re.compile(
+    r"\b(das(?!\s+[A-ZÄÖÜ]\w*)|dies|dieses|davon|dabei|dazu|dafür|darüber|"
+    r"[Tt]his|[Tt]hat|[Ii]t|[Tt]hese|[Tt]hose)\b",
+)
+
 # Patterns for greetings / non-retrieval queries
 _GREETING_PATTERN = re.compile(
     r"^(hallo|hi|hey|guten\s+(tag|morgen|abend)|servus|hello|good\s+(morning|evening)|danke|thank)",
@@ -273,15 +281,19 @@ class QueryPipeline:
         if _AIT_INDICATORS.search(user_message):
             return "ait"
 
-        # Check conversation history (most recent first) for source decisions
-        for msg in reversed(history):
-            content = msg.get("content", "")
-            if not content:
-                continue
-            if _LKR_INDICATORS.search(content):
-                return "lkr"
-            if _AIT_INDICATORS.search(content):
-                return "ait"
+        # Only check history if current message has anaphoric references
+        has_anaphora = bool(_ANAPHORA_PATTERN.search(user_message))
+
+        if has_anaphora:
+            # Scan only user messages in history (not assistant replies)
+            for msg in reversed(history):
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content", "")
+                if _LKR_INDICATORS.search(content):
+                    return "lkr"
+                if _AIT_INDICATORS.search(content):
+                    return "ait"
 
         return self.config.default_data_source
 
@@ -362,12 +374,7 @@ class QueryPipeline:
             Reformulated query string
         """
         # Check for anaphoric patterns
-        anaphora = re.search(
-            r"\b(das|dies|dieses|es|davon|dabei|dazu|dafür|darüber|"
-            r"this|that|it|these|those)\b",
-            user_message,
-            re.IGNORECASE,
-        )
+        anaphora = _ANAPHORA_PATTERN.search(user_message)
 
         if not anaphora or not history:
             return user_message

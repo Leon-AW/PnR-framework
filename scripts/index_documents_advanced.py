@@ -101,6 +101,7 @@ def index_source(
                     "section": chunk.section_breadcrumb or "",
                     "content_type": chunk.content_type or "text",
                     "path": chunk.path or "",
+                    "chunk_index": chunk.chunk_index,
                 })
 
             if (i + 1) % 100 == 0:
