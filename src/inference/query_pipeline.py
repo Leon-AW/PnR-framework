@@ -193,6 +193,7 @@ class QueryPipeline:
         self._intranet_links: dict[str, str] = {}
         self._query_count = 0
         self._total_retrieval_time = 0.0
+        self._last_hyde_doc = ""
 
     def load(self) -> None:
         """Load all models and indices."""
@@ -364,7 +365,8 @@ class QueryPipeline:
         """Resolve anaphoric references using conversation history.
 
         If the user message contains pronouns like "das", "es", "this", "it"
-        without clear referents, prepend context from the last assistant reply.
+        without clear referents, uses LLM-based reformulation (if enabled)
+        or falls back to naive prepending.
 
         Args:
             user_message: Current user message
@@ -389,8 +391,76 @@ class QueryPipeline:
         if not last_user_msg:
             return user_message
 
-        # Prepend the previous topic as context for the search query
+        # LLM-based anaphora resolution
+        if self.config.enable_llm_anaphora:
+            resolved = self._resolve_anaphora_llm(user_message, last_user_msg)
+            if resolved:
+                return resolved
+
+        # Fallback: prepend the previous topic as context for the search query
         return f"{last_user_msg} {user_message}"
+
+    def _resolve_anaphora_llm(
+        self, user_message: str, last_user_msg: str
+    ) -> str:
+        """Resolve anaphora using an LLM call to reformulate the query.
+
+        Sends the current and previous user message to llama.cpp with a
+        system prompt instructing it to produce a standalone reformulation.
+
+        Args:
+            user_message: Current user message with anaphoric references
+            last_user_msg: Previous user message providing context
+
+        Returns:
+            Reformulated query string, or empty string on failure
+        """
+        system_msg = (
+            "Du bist ein Query-Reformulierer. Der Benutzer hat eine Folgefrage gestellt, "
+            "die Pronomen oder Verweise auf eine vorherige Frage enthält. "
+            "Formuliere die aktuelle Frage so um, dass sie eigenständig verständlich ist. "
+            "Ersetze Pronomen und Demonstrativa durch die konkreten Bezüge. "
+            "Füge KEINE neuen Informationen hinzu. Antworte NUR mit der umformulierten Frage."
+        )
+
+        user_prompt = (
+            f"Vorherige Frage: {last_user_msg}\n"
+            f"Aktuelle Frage: {user_message}"
+        )
+
+        try:
+            response = httpx.post(
+                f"{self.config.llama_url}/v1/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": self.config.anaphora_max_tokens,
+                    "temperature": self.config.anaphora_temperature,
+                    "stream": False,
+                },
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            resolved = data["choices"][0]["message"]["content"]
+            # Strip <think>...</think> blocks
+            resolved = re.sub(r"<think>.*?</think>", "", resolved, flags=re.DOTALL).strip()
+
+            if len(resolved) < 5:
+                logger.warning(
+                    f"LLM anaphora resolution returned too short result "
+                    f"({len(resolved)} chars), falling back to naive prepending"
+                )
+                return ""
+
+            logger.info(f"LLM anaphora: '{user_message}' -> '{resolved}'")
+            return resolved
+
+        except Exception as e:
+            logger.warning(f"LLM anaphora resolution failed, falling back to naive prepending: {e}")
+            return ""
 
     # -------------------------------------------------------------------------
     # HyDE (Hypothetical Document Embeddings)
@@ -482,6 +552,7 @@ class QueryPipeline:
         # HyDE: generate hypothetical document and merge FAISS results
         if self.config.enable_hyde:
             hyde_doc = self._generate_hyde_document(query, language, data_source)
+            self._last_hyde_doc = hyde_doc
             if hyde_doc:
                 hyde_embedding = self._embedding_model.encode(hyde_doc)
                 hyde_results = faiss_store.search(
@@ -591,6 +662,7 @@ class QueryPipeline:
             candidates,
             top_k=self.config.rerank_top_k,
             min_score=self.config.reranker_min_score,
+            min_results=self.config.reranker_min_results,
         )
 
     # -------------------------------------------------------------------------
@@ -700,23 +772,17 @@ class QueryPipeline:
         Returns:
             List of message dicts in OpenAI format
         """
-        # System prompt
-        source_label = "LKR (Leichtmetallkompetenzzentrum Ranshofen)" if analysis.data_source == "lkr" else "AIT (Austrian Institute of Technology)"
 
         if analysis.language == "de":
             system_prompt = (
-                f"Du bist ein hilfreicher Assistent für Qualitätsmanagement-Dokumentation "
-                f"({source_label}). "
+                f"Du bist ein hilfreicher Assistent für Qualitätsmanagement-Dokumentation. "
                 f"Beantworte Fragen basierend auf dem bereitgestellten Kontext. "
-                f"Verwende die [Quelle N] Verweise in deinen Antworten, um auf die "
-                f"relevanten Dokumente zu verweisen. "
                 f"Wenn die Antwort nicht im Kontext enthalten ist, sage das ehrlich. "
                 f"Antworte auf Deutsch, es sei denn, der Benutzer fragt auf Englisch."
             )
         else:
             system_prompt = (
-                f"You are a helpful assistant for quality management documentation "
-                f"({source_label}). "
+                f"You are a helpful assistant for quality management documentation. "
                 f"Answer questions based on the provided context. "
                 f"Use [Source N] references in your answers to cite relevant documents. "
                 f"If the answer is not in the context, say so honestly."
@@ -760,6 +826,7 @@ class QueryPipeline:
         """
         start_time = time.time()
         self._query_count += 1
+        self._last_hyde_doc = ""
 
         # 1. Analyze query
         analysis = self.analyze_query(user_message, history)
@@ -836,5 +903,6 @@ class QueryPipeline:
                 "data_source": analysis.data_source,
                 "candidates_before_rerank": len(candidates),
                 "results_after_rerank": len(reranked),
+                "hyde_document": self._last_hyde_doc if self.config.enable_hyde else "",
             },
         )

@@ -85,11 +85,18 @@ class RAGServerConfig:
 
     # HyDE (Hypothetical Document Embeddings)
     enable_hyde: bool = True
+    enable_hyde_visibility: bool = True
     hyde_max_tokens: int = 150
     hyde_temperature: float = 0.3
 
+    # LLM-based anaphora resolution
+    enable_llm_anaphora: bool = True
+    anaphora_max_tokens: int = 100
+    anaphora_temperature: float = 0.1
+
     # Reranker relevance threshold
     reranker_min_score: float = 0.1
+    reranker_min_results: int = 5
 
     # Intranet link mapping
     intranet_links_path: str = "./qm_vectorstore_advanced/intranet_links.json"
@@ -129,9 +136,14 @@ class RAGServerConfig:
             enable_think_stripping=os.environ.get("RAG_ENABLE_THINK_STRIPPING", "true").lower() == "true",
             enable_citations=os.environ.get("RAG_ENABLE_CITATIONS", "true").lower() == "true",
             enable_hyde=os.environ.get("RAG_ENABLE_HYDE", "true").lower() == "true",
+            enable_hyde_visibility=os.environ.get("RAG_ENABLE_HYDE_VISIBILITY", "true").lower() == "true",
             hyde_max_tokens=int(os.environ.get("RAG_HYDE_MAX_TOKENS", cls.hyde_max_tokens)),
             hyde_temperature=float(os.environ.get("RAG_HYDE_TEMPERATURE", cls.hyde_temperature)),
+            enable_llm_anaphora=os.environ.get("RAG_ENABLE_LLM_ANAPHORA", "true").lower() == "true",
+            anaphora_max_tokens=int(os.environ.get("RAG_ANAPHORA_MAX_TOKENS", cls.anaphora_max_tokens)),
+            anaphora_temperature=float(os.environ.get("RAG_ANAPHORA_TEMPERATURE", cls.anaphora_temperature)),
             reranker_min_score=float(os.environ.get("RAG_RERANKER_MIN_SCORE", cls.reranker_min_score)),
+            reranker_min_results=int(os.environ.get("RAG_RERANKER_MIN_RESULTS", cls.reranker_min_results)),
             intranet_links_path=os.environ.get("RAG_INTRANET_LINKS_PATH", cls.intranet_links_path),
             default_data_source=os.environ.get("RAG_DEFAULT_DATA_SOURCE", cls.default_data_source),
             log_level=os.environ.get("RAG_LOG_LEVEL", cls.log_level),

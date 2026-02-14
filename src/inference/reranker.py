@@ -87,6 +87,7 @@ class Reranker:
         candidates: list[SearchResult],
         top_k: Optional[int] = None,
         min_score: Optional[float] = None,
+        min_results: int = 1,
     ) -> list[SearchResult]:
         """Rerank candidates using cross-encoder scores.
 
@@ -95,6 +96,8 @@ class Reranker:
             candidates: List of retrieval candidates
             top_k: Number of results to return (default: all)
             min_score: Minimum relevance score threshold (default: no filtering)
+            min_results: Minimum number of results to keep even if below
+                min_score (default: 1)
 
         Returns:
             Reranked list of SearchResult objects with updated scores
@@ -129,7 +132,16 @@ class Reranker:
 
         # Apply minimum score threshold before top_k truncation
         if min_score is not None:
-            scored = [r for r in scored if r.score >= min_score]
+            filtered = [r for r in scored if r.score >= min_score]
+            if len(filtered) < min_results and scored:
+                # Keep at least min_results even if below threshold
+                filtered = scored[:min_results]
+                logger.info(
+                    f"Only {len([r for r in scored if r.score >= min_score])} results "
+                    f"above min_score={min_score}, keeping top-{min_results} "
+                    f"(scores: {[f'{r.score:.4f}' for r in filtered]})"
+                )
+            scored = filtered
 
         if top_k is not None:
             scored = scored[:top_k]

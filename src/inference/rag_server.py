@@ -207,14 +207,15 @@ async def chat_completions(request: Request):
                 llama_body[key] = body[key]
 
         language = result.query_analysis.language
+        hyde_text = result.metadata.get("hyde_document", "")
 
         if stream:
             return StreamingResponse(
-                _stream_response(llama_body, result.citations, language),
+                _stream_response(llama_body, result.citations, language, hyde_text),
                 media_type="text/event-stream",
             )
         else:
-            return await _non_stream_response(llama_body, result.citations, language)
+            return await _non_stream_response(llama_body, result.citations, language, hyde_text)
 
     except HTTPException:
         raise
@@ -228,7 +229,7 @@ async def chat_completions(request: Request):
 # =============================================================================
 
 async def _stream_response(
-    llama_body: dict, citations: list, language: str = "de"
+    llama_body: dict, citations: list, language: str = "de", hyde_text: str = ""
 ) -> AsyncGenerator[str, None]:
     """Stream SSE response from llama.cpp with think-token stripping and citation footer.
 
@@ -261,6 +262,11 @@ async def _stream_response(
                     if buffer and not in_think and config.enable_think_stripping:
                         yield _make_sse_chunk(buffer)
                         buffer = ""
+
+                    # Append HyDE expansion section
+                    if config.enable_hyde_visibility and hyde_text:
+                        hyde_section = _format_hyde_section(hyde_text, language)
+                        yield _make_sse_chunk(hyde_section)
 
                     # Append citation footer
                     if config.enable_citations and citations:
@@ -363,7 +369,7 @@ def _make_sse_chunk(content: str) -> str:
 # Non-Streaming Response
 # =============================================================================
 
-async def _non_stream_response(llama_body: dict, citations: list, language: str = "de") -> JSONResponse:
+async def _non_stream_response(llama_body: dict, citations: list, language: str = "de", hyde_text: str = "") -> JSONResponse:
     """Forward request to llama.cpp and post-process the response."""
     try:
         resp = await http_client.post(
@@ -396,6 +402,10 @@ async def _non_stream_response(llama_body: dict, citations: list, language: str 
                 )
                 content = content.strip()
 
+            # Append HyDE expansion section
+            if config.enable_hyde_visibility and hyde_text:
+                content += _format_hyde_section(hyde_text, language)
+
             # Append citation footer
             if config.enable_citations and citations:
                 content += _format_citation_footer(citations, language)
@@ -419,6 +429,16 @@ async def _non_stream_response(llama_body: dict, citations: list, language: str 
 # =============================================================================
 # Citation Formatting
 # =============================================================================
+
+def _format_hyde_section(hyde_text: str, language: str = "de") -> str:
+    """Format the HyDE hypothetical document as a blockquote section."""
+    if not hyde_text:
+        return ""
+    label = "HyDE-Expansion (hypothetisches Dokument)" if language == "de" else "HyDE Expansion (hypothetical document)"
+    # Indent each line as blockquote
+    quoted = "\n".join(f"> {line}" for line in hyde_text.splitlines())
+    return f"\n\n---\n**{label}:**\n{quoted}"
+
 
 def _format_citation_footer(citations: list, language: str = "de") -> str:
     """Format citation footer for appending to responses.
