@@ -169,7 +169,7 @@ def check_distributed_compatibility(devices, num_processes=None):
         print("       MIG requires special handling for multi-process training")
         print()
         print("       Recommended approach for MIG:")
-        print("       1. Use SINGLE device training (--target_devices 0)")
+        print("       1. Use SINGLE device training (set CUDA_VISIBLE_DEVICES=0)")
         print("       2. Or use accelerate with proper MIG config")
         print()
         if num_processes > 1:
@@ -263,7 +263,6 @@ def generate_recommendations(devices):
         print("   python train_rag_baseline.py \\")
         print("       --data_path data/archive.json \\")
         print("       --docs_path data/documents/ \\")
-        print("       --target_devices 0 \\")
         print("       --batch_size 1 \\")
         print("       --gradient_accumulation 16 \\")
         print("       --max_seq_length 1024")
