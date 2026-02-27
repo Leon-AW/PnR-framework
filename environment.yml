@@ -1,6 +1,6 @@
 # Patch-and-Route Framework - Conda Environment
 # ==============================================
-# 
+#
 # Setup:
 #   conda env create -f environment.yml
 #   conda activate pnr
@@ -10,50 +10,59 @@
 
 name: pnr
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
   - defaults
 
 dependencies:
   # Python version
   - python=3.11
-  
-  # PyTorch with CUDA support (adjust cuda version as needed)
-  - pytorch>=2.1.0
-  - pytorch-cuda=12.1
-  - torchvision
-  - torchaudio
-  
+
   # Core utilities
   - pip
   - git
-  
-  # Pip-installed packages (HuggingFace ecosystem)
+
+  # Pip-installed packages
   - pip:
+    # PyTorch with CUDA 12.4 (installed via pip for Blackwell SM 120 support)
+    - torch>=2.7.0
+    - torchvision>=0.22.0
+    - torchaudio>=2.7.0
+
     # Transformers & PEFT
     - transformers>=4.40.0
     - peft>=0.10.0
     - trl>=0.8.0
     - datasets>=2.18.0
     - accelerate>=0.28.0
-    
+
     # Quantization
     - bitsandbytes>=0.43.0
-    
+
     # Tokenizers
     - sentencepiece>=0.2.0
     - protobuf>=4.25.0
-    
+
     # Evaluation
     - evaluate>=0.4.0
     - scikit-learn>=1.4.0
-    
+
     # Utilities
     - tqdm>=4.66.0
     - python-dotenv>=1.0.0
-    
+
+    # RAG & Embeddings
+    - sentence-transformers>=2.2.0
+    - faiss-cpu>=1.7.4
+    - chromadb>=0.4.0
+
+    # Advanced RAG Server
+    - fastapi>=0.109.0
+    - uvicorn[standard]>=0.27.0
+    - httpx>=0.27.0
+    - sse-starlette>=1.8.0
+    - rank_bm25>=0.2.2
+    - simplemma>=1.0.0
+
     # Development (optional)
     - black>=24.0.0
     - ruff>=0.3.0
-
