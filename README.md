@@ -2,7 +2,7 @@
 
 > A Modular Framework for Continual Learning in Enterprise LLMs
 
-[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/Leon-AW/PnR-framework)
+[![Version](https://img.shields.io/badge/version-0.2.0-green.svg)](https://github.com/Leon-AW/PnR-framework)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -148,6 +148,70 @@ llm.load_expert("checkpoints/base_v1")
 # {user_question}
 ```
 
+## Experiment Tracking (MLflow)
+
+Every training run is automatically tracked with [MLflow](https://mlflow.org/). No server is required — results are stored in a local SQLite database (`mlruns.db`) and browsed via the MLflow UI.
+
+### What is logged
+
+| Category | Details |
+|----------|---------|
+| **Parameters** | All `TrainingConfig` fields (lr, batch size, LoRA rank, steps, precision, …) |
+| **Metrics (step-level)** | `loss`, `eval_loss`, `learning_rate` — updated every `--logging_steps` |
+| **Metrics (final)** | `train_loss`, `train_runtime`, `train_samples_per_second`, `mean_token_accuracy` |
+| **GPU memory** | Peak VRAM allocated (GB) after training completes |
+| **Tags** | `adapter_path` → resolved checkpoint path, `status` (FINISHED / FAILED) |
+
+### Naming runs
+
+All three training scripts accept two optional arguments:
+
+```bash
+python train_monolithic_baseline.py \
+    --data_paths data/archive.json \
+    --experiment_name pnr-training \   # groups related runs together
+    --run_name monolithic_v1           # human-readable name for this run
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--experiment_name` | `pnr-training` | MLflow experiment (groups runs) |
+| `--run_name` | adapter / script name | Label for this individual run |
+
+### Browsing results
+
+```bash
+# Start the UI (keep running while you browse)
+mlflow ui --backend-store-uri sqlite:///mlruns.db
+# → open http://localhost:5000
+```
+
+The UI must be started manually each session. The database (`mlruns.db`) persists all runs indefinitely across sessions.
+
+**On a remote server (SSH)** — forward the port to your local machine:
+
+```bash
+# On your local machine:
+ssh -L 5000:localhost:5000 <your-server>
+# Then open http://localhost:5000 in your browser
+```
+
+### Programmatic access
+
+```python
+from src.utils.mlflow_tracker import PnRTracker
+
+with PnRTracker(experiment_name="my-exp", run_name="run-01") as tracker:
+    tracker.log_training_config(config)
+    tracker.log_model_config(foundation_config, expert_config)
+    # ... training ...
+    tracker.log_metrics({"train_loss": 0.42})
+    tracker.log_gpu_memory()
+    tracker.log_adapter_artifact("checkpoints/my_adapter")
+```
+
+`PnRTracker` is a no-op if `mlflow` is not installed, so training scripts work unchanged without the dependency.
+
 ## Local JSON Fine-Tuning
 
 Train on your own QA datasets with two baseline approaches.
@@ -267,6 +331,8 @@ python train_rag_baseline.py \
 | `--no_negatives` | False | Exclude negative samples |
 | `--language_filter` | None | Filter by language code |
 | `--validation_split` | 0.1 | Validation fraction |
+| `--experiment_name` | `pnr-training` | MLflow experiment name |
+| `--run_name` | `monolithic_baseline` | MLflow run name |
 
 #### RAG Baseline (`train_rag_baseline.py`)
 
@@ -280,6 +346,8 @@ python train_rag_baseline.py \
 | `--chunk_size` | 750 | Target chunk tokens |
 | `--max_doc_tokens` | 2500 | Threshold for chunking |
 | `--max_seq_length` | 1024 | Sequence length (1024 for 24GB VRAM) |
+| `--experiment_name` | `pnr-training` | MLflow experiment name |
+| `--run_name` | `<adapter_name>` | MLflow run name |
 
 ### Quick Test (Smoke Test)
 
@@ -287,7 +355,119 @@ python train_rag_baseline.py \
 python train_monolithic_baseline.py \
     --data_paths data/test.json \
     --output_dir checkpoints/test \
-    --max_steps 50
+    --max_steps 5 \
+    --experiment_name test-exp
+```
+
+A small `data/test.json` file with 10 QA samples is included in the repository for smoke testing.
+
+## Evaluation
+
+Measure answer quality, routing correctness, and catastrophic forgetting with the built-in evaluation suite.
+
+### Quick Start
+
+```bash
+# Evaluate on base + temporal splits (200 samples each)
+python eval_pnr.py \
+    --eval_sets base temporal \
+    --n_samples 200 \
+    --experiment_name pnr-evaluation \
+    --run_name pnr_v1
+
+# Evaluate on local JSON file
+python eval_pnr.py \
+    --eval_sets local \
+    --local_data_paths data/test.json \
+    --n_samples 50
+
+# Evaluate a specific geographic split
+python eval_pnr.py \
+    --eval_sets geo_india geo_germany \
+    --n_samples 100
+```
+
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| **Exact Match (EM)** | Fraction of answers matching any gold answer after SQuAD-style normalization |
+| **Token F1** | Word-level F1 score (max across gold answers) |
+| **Routing Accuracy** | Fraction of queries routed to the expected adapter |
+| **ESR** | Effective Success Rate — routed correctly *and* answered correctly |
+| **Stability Score** | EM on "base" split (measures catastrophic forgetting) |
+| **CFR** | Catastrophic Forgetting Rate vs. a monolithic baseline |
+| **Latency** | Average and P95 inference latency per sample |
+| **Peak VRAM** | Maximum GPU memory allocated during evaluation |
+
+### Baseline Comparison (CFR)
+
+Run two passes to compute the Catastrophic Forgetting Rate:
+
+```bash
+# Pass 1: monolithic baseline (bypasses routing)
+python eval_pnr.py \
+    --eval_sets base \
+    --n_samples 100 \
+    --monolithic checkpoints/monolithic_v1 \
+    --run_name baseline_pass
+
+# Pass 2: PnR system (uses routing)
+python eval_pnr.py \
+    --eval_sets base \
+    --n_samples 100 \
+    --run_name pnr_pass
+```
+
+Compare the two `eval_results/*/report.json` files, or use `EvalRunner.run(baseline_results=...)` programmatically.
+
+### LLM-as-a-Judge
+
+Enable quality scoring (1–5) alongside EM/F1:
+
+```bash
+python eval_pnr.py \
+    --eval_sets base temporal \
+    --n_samples 50 \
+    --use_llm_judge
+```
+
+### CLI Reference
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--eval_sets` | `base temporal` | Splits: `base`, `temporal`, `geo_<country>`, `local` |
+| `--n_samples` | 200 | Max samples per split |
+| `--local_data_paths` | — | JSON files for `local` split |
+| `--monolithic` | None | Adapter path — bypasses routing (baseline mode) |
+| `--similarity_threshold` | 0.65 | Router similarity threshold |
+| `--quantization` | `int4` | `none`, `int8`, `int4` |
+| `--max_new_tokens` | 256 | Tokens to generate per sample |
+| `--temperature` | 0.1 | Sampling temperature (low for reproducibility) |
+| `--use_llm_judge` | False | Enable LLM-as-a-judge scoring |
+| `--experiment_name` | `pnr-evaluation` | MLflow experiment name |
+| `--run_name` | auto | MLflow run name |
+| `--output_dir` | `eval_results` | Directory for JSON results |
+
+Results are saved to `eval_results/<run_name>/results.json` (per-sample) and `report.json` (summary).
+
+### Programmatic API
+
+```python
+from src.eval import EvalRunner, EvalConfig
+
+config = EvalConfig(
+    eval_sets=["base", "temporal"],
+    n_samples=50,
+    mlflow_experiment="pnr-evaluation",
+    mlflow_run_name="pnr_v1",
+)
+runner = EvalRunner(config)
+report = runner.run()
+
+print(report["summary"]["exact_match_overall"])
+print(report["summary"]["routing_accuracy"])
+print(report["by_split"])
 ```
 
 ## VanillaRAG Deployment
@@ -326,6 +506,12 @@ PnR-framework/
 │   │   ├── local_loader.py              # Local JSON dataset loader
 │   │   ├── chunker.py                   # Document chunking for RAG
 │   │   └── structure_aware_chunker.py   # Structure-preserving chunker (tables, lists)
+│   ├── eval/
+│   │   ├── __init__.py                  # Package exports
+│   │   ├── metrics.py                   # Pure metric functions (EM, F1, ESR, CFR, …)
+│   │   ├── dataset.py                   # EvalSample + SituatedQA/local dataset builders
+│   │   ├── runner.py                    # EvalConfig, EvalResult, EvalRunner orchestrator
+│   │   └── judge.py                     # Optional LLM-as-a-judge scoring
 │   ├── inference/
 │   │   ├── vanilla_rag.py               # Standalone RAG pipeline
 │   │   ├── embeddings.py                # Embedding model wrapper
@@ -343,7 +529,8 @@ PnR-framework/
 │   │   └── trainer.py                   # SFTTrainer for streaming datasets
 │   └── utils/
 │       ├── config.py                    # Configuration management
-│       └── logging.py                   # Centralized logging
+│       ├── logging.py                   # Centralized logging
+│       └── mlflow_tracker.py            # MLflow experiment tracking (PnRTracker)
 ├── scripts/
 │   ├── compute_centroids.py             # Offline centroid computation
 │   ├── merge_and_convert.sh             # Adapter → GGUF pipeline
@@ -351,6 +538,7 @@ PnR-framework/
 ├── examples/
 │   └── router_demo.py                   # Router demonstration
 ├── checkpoints/                         # Trained adapter checkpoints
+├── eval_pnr.py                          # Evaluation CLI (EM, F1, routing, ESR, CFR)
 ├── train_base_adapter.py                # SituatedQA training entry point
 ├── train_monolithic_baseline.py         # Monolithic JSON training
 ├── train_rag_baseline.py                # RAG baseline training
@@ -648,6 +836,9 @@ Full options: `python train_base_adapter.py --help`
 - **faiss-cpu** >= 1.7.4
 - **chromadb** >= 0.4.0
 
+### Experiment Tracking
+- **mlflow** >= 2.10.0
+
 ### Development
 - **black** >= 24.0.0
 - **ruff** >= 0.3.0
@@ -681,12 +872,13 @@ Based on the Master's Thesis timeline (6 months).
 - [x] Multi-expert inference (Expert Pool)
 - [x] Knowledge Router implementation (Time-Aware Centroid Router)
 - [x] Conflict resolution (Source-Replay mechanism)
-- [ ] Evaluation pipeline
+- [x] Evaluation pipeline (`eval_pnr.py` — EM, F1, ESR, CFR, routing accuracy, LLM judge)
 - [ ] Parallel Orchestrator (Section 4.4.2)
 - [x] SituatedQA and CounterFact data loaders
 - [x] Chat template formatting for instruction tuning
 - [x] Configuration serialization (JSON)
 - [x] Centralized logging system
+- [x] MLflow experiment tracking (run comparison, loss curves, GPU memory)
 - [x] Data preparation pipeline (PDF → Markdown → QA pairs)
 - [x] QM corpus preprocessing (AIT proprietary data)
 
