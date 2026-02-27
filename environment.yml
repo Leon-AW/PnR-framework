@@ -63,6 +63,9 @@ dependencies:
     - rank_bm25>=0.2.2
     - simplemma>=1.0.0
 
+    # Experiment tracking
+    - mlflow>=2.10.0
+
     # Development (optional)
     - black>=24.0.0
     - ruff>=0.3.0

@@ -3,6 +3,10 @@ docs/
 .claude/
 .cursor/
 
+# MLflow tracking store
+mlruns/
+mlruns.db
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

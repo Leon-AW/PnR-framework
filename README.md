@@ -663,7 +663,6 @@ Three-dataset evaluation plan:
 |---------|------|---------|----------------|
 | **[SituatedQA](https://huggingface.co/datasets/situated_qa)** | Public, temporal | Temporal dynamics evaluation | Pre-2019 = stable, Post-2019 = updates |
 | **[CounterFact-Tracing](https://huggingface.co/datasets/NeelNanda/counterfact-tracing)** | Public, counterfactual | Controlled editing (21,919 items) | D_Target (100 edits), D_Control (stability) |
-| **AIT QM Corpus** | Proprietary | Enterprise case study | 250-item QA benchmark + curated updates |
 
 ### Evaluation Metrics
 

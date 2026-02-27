@@ -121,9 +121,14 @@ class TrainingConfig:
     
     # Streaming-specific
     dataset_buffer_size: int = 10_000  # Shuffle buffer for streaming
-    
+
     # Regularization (Generalization)
     neftune_noise_alpha: float | None = 5.0  # NEFTune noise for better generalization
+
+    # MLflow experiment tracking
+    mlflow_experiment: str = "pnr-training"
+    mlflow_run_name: str | None = None
+    mlflow_tracking_uri: str = "sqlite:///mlruns.db"
     
     def __post_init__(self):
         """Auto-configure precision based on hardware capabilities."""
@@ -417,10 +422,20 @@ class PatchAndRouteTrainer:
         
         # Get formatting function
         formatting_func = self._formatting_func or self._default_formatting_func
-        
+
         # Build SFT config
         sft_config = self.config.to_sft_config()
-        
+
+        # Optionally attach step-level MLflow callback
+        callbacks = []
+        try:
+            from src.utils.mlflow_tracker import MLflowStepCallback, _MLFLOW_AVAILABLE
+            if _MLFLOW_AVAILABLE:
+                callbacks.append(MLflowStepCallback())
+                logger.info("MLflowStepCallback registered for step-level logging")
+        except ImportError:
+            pass
+
         # Create trainer
         self.trainer = SFTTrainer(
             model=self.model,
@@ -429,8 +444,9 @@ class PatchAndRouteTrainer:
             eval_dataset=eval_data,
             processing_class=self.tokenizer,
             formatting_func=formatting_func,
+            callbacks=callbacks if callbacks else None,
         )
-        
+
         logger.info("✓ SFTTrainer built successfully")
         return self.trainer
     
@@ -443,9 +459,6 @@ class PatchAndRouteTrainer:
         Returns:
             Training metrics dictionary.
         """
-        if self.trainer is None:
-            self.build_trainer()
-        
         logger.info("=" * 60)
         logger.info("STARTING EXPERT ADAPTER TRAINING")
         logger.info("=" * 60)
@@ -453,22 +466,45 @@ class PatchAndRouteTrainer:
         logger.info(f"Batch size: {self._effective_batch_size}")
         logger.info(f"Learning rate: {self.config.learning_rate}")
         logger.info(f"Output: {self.config.output_dir}")
+        logger.info(f"MLflow experiment: {self.config.mlflow_experiment}")
         logger.info("=" * 60)
-        
-        # Run training
-        train_result = self.trainer.train(
-            resume_from_checkpoint=resume_from_checkpoint
-        )
-        
-        # Log results
-        metrics = train_result.metrics
-        logger.info("=" * 60)
-        logger.info("TRAINING COMPLETE")
-        logger.info("=" * 60)
-        for key, value in metrics.items():
-            logger.info(f"  {key}: {value}")
-        logger.info("=" * 60)
-        
+
+        # Import tracker (graceful no-op if mlflow missing)
+        try:
+            from src.utils.mlflow_tracker import PnRTracker, _MLFLOW_AVAILABLE
+            _use_mlflow = _MLFLOW_AVAILABLE
+        except ImportError:
+            _use_mlflow = False
+
+        def _build_and_run():
+            if self.trainer is None:
+                self.build_trainer()
+            train_result = self.trainer.train(
+                resume_from_checkpoint=resume_from_checkpoint
+            )
+            metrics = train_result.metrics
+            logger.info("=" * 60)
+            logger.info("TRAINING COMPLETE")
+            logger.info("=" * 60)
+            for key, value in metrics.items():
+                logger.info(f"  {key}: {value}")
+            logger.info("=" * 60)
+            return metrics
+
+        if _use_mlflow:
+            with PnRTracker(
+                experiment_name=self.config.mlflow_experiment,
+                run_name=self.config.mlflow_run_name,
+                tracking_uri=self.config.mlflow_tracking_uri,
+            ) as tracker:
+                tracker.log_training_config(self.config)
+                metrics = _build_and_run()
+                tracker.log_metrics(metrics)
+                tracker.log_gpu_memory()
+                tracker.log_adapter_artifact(self.config.output_dir)
+        else:
+            metrics = _build_and_run()
+
         return metrics
     
     def save_model(self, output_dir: str | Path | None = None) -> Path:

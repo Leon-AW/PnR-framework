@@ -28,14 +28,10 @@ __author__ = "Leon Wagner"
 
 # Convenience imports
 from src.routing import CentroidRouter, AdapterManifest, SourceReplayStore
-from src.inference import PatchAndRouteInference, GenerationConfig, InferenceResult
 
 __all__ = [
     "CentroidRouter",
-    "AdapterManifest", 
+    "AdapterManifest",
     "SourceReplayStore",
-    "PatchAndRouteInference",
-    "GenerationConfig",
-    "InferenceResult",
 ]
 

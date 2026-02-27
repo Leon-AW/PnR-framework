@@ -202,6 +202,20 @@ def parse_args() -> argparse.Namespace:
         help="Disable Chain-of-Thought training (omit <think> blocks from analysis field)",
     )
 
+    # MLflow experiment tracking
+    parser.add_argument(
+        "--experiment_name",
+        type=str,
+        default="pnr-training",
+        help="MLflow experiment name",
+    )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="MLflow run name (defaults to 'monolithic_baseline')",
+    )
+
     return parser.parse_args()
 
 
@@ -367,6 +381,8 @@ def main() -> None:
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
         seed=args.seed,
+        mlflow_experiment=args.experiment_name,
+        mlflow_run_name=args.run_name or "monolithic_baseline",
     )
 
     # Convert Dataset to format expected by trainer

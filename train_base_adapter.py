@@ -186,7 +186,21 @@ def parse_args() -> argparse.Namespace:
         default="INFO",
         help="Logging verbosity",
     )
-    
+
+    # MLflow experiment tracking
+    parser.add_argument(
+        "--experiment_name",
+        type=str,
+        default="pnr-training",
+        help="MLflow experiment name",
+    )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="MLflow run name (defaults to 'base_v1')",
+    )
+
     return parser.parse_args()
 
 
@@ -299,6 +313,8 @@ def main() -> None:
         max_seq_length=args.max_seq_length,
         seed=args.seed,
         dataset_buffer_size=args.buffer_size,
+        mlflow_experiment=args.experiment_name,
+        mlflow_run_name=args.run_name or "base_v1",
     )
     
     # =========================================================================
