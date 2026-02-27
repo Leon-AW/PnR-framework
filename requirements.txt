@@ -27,6 +27,10 @@ protobuf>=4.25.0
 evaluate>=0.4.0
 scikit-learn>=1.4.0
 
+# Routing & Retrieval (Source-Replay)
+faiss-cpu>=1.7.4  # Use faiss-gpu for GPU acceleration
+sentence-transformers>=2.2.0  # For embedding models (KaLM, BGE, E5, etc.)
+
 # Development
 tqdm>=4.66.0
 python-dotenv>=1.0.0

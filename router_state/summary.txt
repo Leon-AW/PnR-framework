@@ -1,0 +1,34 @@
+Centroid Computation Summary
+Generated: 2026-01-10T15:11:40.928019
+============================================================
+
+============================================================
+CENTROID ROUTER STATUS
+============================================================
+Strategy: centroid
+Similarity threshold: 0.65
+Conflict threshold: 0.1
+Embedding dim: 3840
+------------------------------------------------------------
+============================================================
+ADAPTER MANIFEST
+============================================================
+Total adapters: 13
+With centroids: 0
+------------------------------------------------------------
+  [✗] patch_geo_others               | patch_geo_generic | 2026-01-08 20:48:23
+  [✗] patch_geo_germany              | patch_geo       | 2026-01-08 20:29:40
+  [✗] patch_geo_france               | patch_geo       | 2026-01-08 20:27:17
+  [✗] patch_geo_california           | patch_geo       | 2026-01-08 20:25:09
+  [✗] patch_geo_pakistan             | patch_geo       | 2026-01-08 20:23:00
+  [✗] patch_geo_england              | patch_geo       | 2026-01-08 20:20:50
+  [✗] patch_geo_nigeria              | patch_geo       | 2026-01-08 20:18:27
+  [✗] patch_geo_uk                   | patch_geo       | 2026-01-08 20:15:59
+  [✗] patch_geo_australia            | patch_geo       | 2026-01-08 20:13:30
+  [✗] patch_geo_canada               | patch_geo       | 2026-01-08 20:10:51
+  [✗] patch_geo_india                | patch_geo       | 2026-01-08 19:58:36
+  [✗] patch_temp_2019_plus           | patch_temporal  | 2026-01-08 19:40:17
+  [✗] base_v1                        | base            | 2026-01-08 19:11:29
+============================================================
+------------------------------------------------------------
+Source-Replay adapters: []

@@ -14,22 +14,63 @@ This framework implements the **Patch-and-Route** architecture for continual lea
 |------|-------------|
 | **Frozen Foundation** | Base LLM with frozen parameters (e.g., Mistral-7B) |
 | **Expert Pool** | Collection of domain-specific LoRA adapters |
-| **Knowledge Router** | Dynamic routing mechanism for adapter selection (planned) |
+| **Knowledge Router** | Time-Aware Centroid Router for dynamic adapter selection |
+| **Source-Replay** | RAG-style retrieval from older conflicting adapters |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Patch-and-Route                       │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────────────┐    ┌─────────────────────────────┐ │
-│  │ Frozen Foundation│    │       Expert Pool          │ │
-│  │  (Mistral-7B)   │◄───│  ┌─────┐ ┌─────┐ ┌─────┐  │ │
-│  │   4-bit quant   │    │  │LoRA │ │LoRA │ │LoRA │  │ │
-│  └─────────────────┘    │  │Base │ │Exp.1│ │Exp.2│  │ │
-│                         │  └─────┘ └─────┘ └─────┘  │ │
-│                         └─────────────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Patch-and-Route Pipeline                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌──────────────┐     ┌─────────────────────┐                           │
+│  │  User Query  │────▶│   Centroid Router   │                           │
+│  └──────────────┘     │  (Embed + Match)    │                           │
+│                       └──────────┬──────────┘                           │
+│                                  │                                       │
+│                    ┌─────────────┼─────────────┐                        │
+│                    ▼             ▼             ▼                        │
+│              ┌──────────┐  ┌──────────┐  ┌──────────┐                   │
+│              │ Adapter  │  │ Adapter  │  │ Adapter  │  Expert Pool     │
+│              │  Base    │  │  Geo_DE  │  │ Temp_23  │                   │
+│              │(centroid)│  │(centroid)│  │(centroid)│                   │
+│              └──────────┘  └──────────┘  └──────────┘                   │
+│                    │             │             │                        │
+│                    └─────────────┼─────────────┘                        │
+│                                  │                                       │
+│                    ┌─────────────▼─────────────┐                        │
+│                    │    Conflict Detection     │                        │
+│                    │   (Multiple Matches?)     │                        │
+│                    └─────────────┬─────────────┘                        │
+│                                  │                                       │
+│           ┌──────────────────────┼──────────────────────┐               │
+│           │ Winner (T_new)       │              Loser (T_old)           │
+│           ▼                      │                      ▼               │
+│  ┌─────────────────┐             │         ┌─────────────────┐          │
+│  │  Weight Loading │             │         │  Source-Replay  │          │
+│  │  (Load LoRA)    │             │         │  (FAISS RAG)    │          │
+│  └────────┬────────┘             │         └────────┬────────┘          │
+│           │                      │                  │                   │
+│           │                      │     Retrieved Context               │
+│           │                      │          ▼                          │
+│           │              ┌───────────────────────────┐                  │
+│           └─────────────▶│     Prompt Builder        │◀─────────────────┘
+│                          │ [System] + [Context] +    │                   │
+│                          │ [Query]                   │                   │
+│                          └───────────┬───────────────┘                   │
+│                                      │                                   │
+│                                      ▼                                   │
+│                          ┌───────────────────────────┐                   │
+│                          │   Frozen Foundation       │                   │
+│                          │   (Mistral-7B + LoRA)     │                   │
+│                          └───────────┬───────────────┘                   │
+│                                      │                                   │
+│                                      ▼                                   │
+│                          ┌───────────────────────────┐                   │
+│                          │       Response            │                   │
+│                          └───────────────────────────┘                   │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start
@@ -61,17 +102,34 @@ python train_base_adapter.py \
     --output_dir checkpoints/situatedqa_base_v1
 ```
 
-### 3. Use Trained Adapter
+### 3. Compute Centroids for Routing
+
+```bash
+python scripts/compute_centroids.py \
+    --checkpoints_dir checkpoints/ \
+    --embedding_model /path/to/KaLM-Embedding-Gemma3-12B \
+    --output_dir router_state/ \
+    --index_for_replay
+```
+
+### 4. Run Inference with Routing
 
 ```python
-from src.models.core import PatchAndRouteLLM, ExpertConfig
+from src.inference import PatchAndRouteInference
 
-# Load model with trained adapter
-llm = PatchAndRouteLLM(model_id="mistralai/Mistral-7B-Instruct-v0.3")
-llm.load_frozen_foundation()
-llm.load_expert("checkpoints/situatedqa_base_v1")
+# Initialize pipeline
+pipeline = PatchAndRouteInference(
+    model_id="mistralai/Mistral-7B-Instruct-v0.3",
+    router_path="router_state/",
+    embedding_model_path="/path/to/KaLM-Embedding-Gemma3-12B",
+)
 
-model, tokenizer = llm.get_training_components()
+# Query with automatic routing
+result = pipeline.generate("Who is the Chancellor of Germany in 2023?")
+
+print(result.response)
+print(f"Adapter used: {result.adapter_loaded}")
+print(f"Had conflict: {result.routing_result.has_conflict}")
 ```
 
 ## Project Structure
@@ -80,17 +138,28 @@ model, tokenizer = llm.get_training_components()
 PnR-framework/
 ├── src/
 │   ├── data/
-│   │   └── loader.py       # SituatedQA & CounterFact streaming loaders
+│   │   └── loader.py           # SituatedQA & CounterFact streaming loaders
 │   ├── models/
-│   │   └── core.py         # PatchAndRouteLLM model manager
+│   │   └── core.py             # PatchAndRouteLLM model manager
+│   ├── routing/
+│   │   ├── base.py             # BaseRouter abstract class (Strategy Pattern)
+│   │   ├── centroid_router.py  # Time-Aware Centroid Router
+│   │   ├── manifest.py         # Adapter registration & centroids
+│   │   └── source_replay.py    # FAISS-based retrieval for T_old
 │   ├── training/
-│   │   └── trainer.py      # SFTTrainer for streaming datasets
+│   │   └── trainer.py          # SFTTrainer for streaming datasets
+│   ├── inference.py            # Unified inference pipeline
 │   └── utils/
-│       ├── config.py       # Configuration management
-│       └── logging.py      # Centralized logging
-├── train_base_adapter.py   # Main training entry point
-├── environment.yml         # Conda environment
-└── requirements.txt        # Pip dependencies (fallback)
+│       ├── config.py           # Configuration management
+│       └── logging.py          # Centralized logging
+├── scripts/
+│   └── compute_centroids.py    # Offline centroid computation
+├── examples/
+│   └── router_demo.py          # Router demonstration
+├── checkpoints/                # Trained adapter checkpoints
+├── train_base_adapter.py       # Main training entry point
+├── environment.yml             # Conda environment
+└── requirements.txt            # Pip dependencies (fallback)
 ```
 
 ## Key Features
@@ -135,6 +204,40 @@ SituatedQA split for continual learning experiments:
 | `stream_stable` | year < 2019 | Base Adapter training |
 | `stream_update` | year ≥ 2019 | Knowledge update evaluation |
 
+### Time-Aware Routing
+Automatic adapter selection with conflict resolution:
+
+```python
+from src.routing import CentroidRouter
+
+# Initialize router
+router = CentroidRouter(
+    embedding_model_path="/path/to/embedding-model",
+    similarity_threshold=0.65,
+)
+
+# Register adapters from checkpoints
+router.register_from_checkpoints("checkpoints/")
+
+# Compute centroids (offline)
+router.compute_all_centroids()
+
+# Route query (online)
+result = router.route("Who is the German Chancellor?")
+print(f"Winner: {result.winner_adapter}")  # e.g., "patch_geo_germany"
+print(f"Conflict: {result.has_conflict}")
+```
+
+### Source-Replay (Conflict Resolution)
+When multiple adapters match, the **newest wins** (Weight Loading), older adapters contribute via **retrieval**:
+
+| Adapter Role | Mechanism | Description |
+|--------------|-----------|-------------|
+| **T_new** (Winner) | Weight Loading | LoRA weights loaded into model |
+| **T_old** (Loser) | Source-Replay | Training data retrieved via FAISS |
+
+The retrieved context is injected into the prompt, ensuring both old and new knowledge inform the response.
+
 ## Training Configuration
 
 | Parameter | Default | Description |
@@ -166,10 +269,11 @@ Full options: `python train_base_adapter.py --help`
 - [x] Frozen Foundation with 4-bit quantization
 - [x] Base Expert Adapter training (LoRA)
 - [x] Streaming data with temporal filtering
-- [ ] Multi-expert inference (Expert Pool)
-- [ ] Knowledge Router implementation
-- [ ] conflict resolution
+- [x] Multi-expert inference (Expert Pool)
+- [x] Knowledge Router implementation (Time-Aware Centroid Router)
+- [x] Conflict resolution (Source-Replay mechanism)
 - [ ] Evaluation pipeline
+- [ ] Parallel Orchestrator (Section 4.4.2)
 
 ## Acknowledgments
 

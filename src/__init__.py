@@ -10,11 +10,32 @@ This framework implements the "Patch-and-Route" architecture described in:
 Core Concepts:
 - Frozen Foundation: Base LLM with frozen parameters (e.g., Mistral-7B)
 - Expert Pool: Collection of domain-specific LoRA adapters
-- Knowledge Router: Dynamic routing mechanism for adapter selection
+- Knowledge Router: Dynamic routing mechanism for adapter selection (Time-Aware Centroid Router)
+- Source-Replay: RAG-style retrieval from older conflicting adapters
+
+Modules:
+- src.models: Frozen Foundation and Expert Adapter management
+- src.data: SituatedQA and CounterFact data loaders
+- src.training: SFTTrainer integration
+- src.routing: Time-Aware Centroid Router with Source-Replay
+- src.inference: Unified inference pipeline
 
 Author: Leon Wagner
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Leon Wagner"
+
+# Convenience imports
+from src.routing import CentroidRouter, AdapterManifest, SourceReplayStore
+from src.inference import PatchAndRouteInference, GenerationConfig, InferenceResult
+
+__all__ = [
+    "CentroidRouter",
+    "AdapterManifest", 
+    "SourceReplayStore",
+    "PatchAndRouteInference",
+    "GenerationConfig",
+    "InferenceResult",
+]
 
