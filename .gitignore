@@ -1,5 +1,7 @@
 # Documentation (thesis exposé, private notes)
 docs/
+.claude/
+.cursor/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
