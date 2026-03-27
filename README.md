@@ -17,6 +17,8 @@ This framework implements the **Patch-and-Route** architecture for continual lea
 | **Expert Pool** | Collection of domain-specific LoRA adapters |
 | **Knowledge Router** | Time-Aware Centroid Router for dynamic adapter selection |
 | **Source-Replay** | RAG-style retrieval from older conflicting adapters |
+| **Parallel Orchestrator** | Multi-adapter ensemble with context synthesis (see below) |
+| **MORPHEUS** | Multi-system cognitive architecture for continual learning (see below) |
 
 ## Architecture
 
@@ -498,6 +500,12 @@ python eval_pnr.py \
 | `--local_data_paths` | — | JSON files for `local` split |
 | `--monolithic` | None | Adapter path — bypasses routing (monolithic baseline) |
 | `--xlora` | None | X-LoRA checkpoint path — replaces routing with soft blending |
+| `--parallel` | False | Use Parallel Orchestrator (multi-adapter ensemble + synthesis) |
+| `--parallel_max_adapters` | 5 | Max adapters for parallel execution |
+| `--parallel_planner` | `heuristic` | Query planner mode (`heuristic` or `llm`) |
+| `--parallel_synth_tokens` | 512 | Max tokens for synthesis pass |
+| `--morpheus` | False | Use MORPHEUS multi-system architecture |
+| `--morpheus_state_dir` | None | Path to MORPHEUS state directory (router, experts, knowledge store) |
 | `--similarity_threshold` | 0.65 | Router similarity threshold |
 | `--quantization` | `int4` | `none`, `int8`, `int4` |
 | `--max_new_tokens` | 256 | Tokens to generate per sample |
@@ -526,6 +534,184 @@ report = runner.run()
 print(report["summary"]["exact_match_overall"])
 print(report["summary"]["routing_accuracy"])
 print(report["by_split"])
+```
+
+## Parallel Orchestrator
+
+The **Parallel Orchestrator** is an ensemble-based inference strategy that handles cooperative scenarios where multiple adapters hold complementary knowledge (R2 — Cooperative Composition). Instead of picking a single winner, it generates answers from multiple adapters independently and synthesizes them via the base model.
+
+### Architecture
+
+```
+Query → [Query Planner] → [Parallel Execution] → [Synthesis Agent] → Answer
+              │                    │                      │
+         Classify query      Hot-swap adapters       Base model merges
+         (single/multi/     generate per-adapter     all outputs into
+          broad)            answers sequentially     one coherent answer
+```
+
+**Three components:**
+
+| Component | Role | Implementation |
+|-----------|------|----------------|
+| **Query Planner** | Classifies query intent before adapter loading | Heuristic (keyword + similarity distribution) or LLM-based |
+| **Parallel Execution Engine** | Generates one answer per selected adapter | Sequential LoRA hot-swap on single GPU |
+| **Context Synthesis Agent** | Merges adapter outputs into unified response | Base model (no adapter) with synthesis prompt |
+
+**Query plan types:**
+
+| Type | When | Example |
+|------|------|---------|
+| `SINGLE_LATEST` | Simple factual query | "Who is the CEO?" |
+| `MULTI_TEMPORAL` | Temporal/comparative query | "How has the CEO changed?" |
+| `BROAD_COMPOSITION` | Overview/comprehensive query | "Explain everything about Project X" |
+
+When `SINGLE_LATEST` is selected, the orchestrator short-circuits: it skips synthesis and returns the single adapter's output directly, matching centroid router performance.
+
+### Quick Start
+
+```python
+from src.routing import CentroidRouter, ParallelOrchestrator
+from src.models.core import PatchAndRouteLLM, FrozenFoundationConfig
+from src.inference import GenerationConfig
+
+# Set up router and LLM
+router = CentroidRouter(embedding_model_path="...")
+router.register_from_checkpoints("checkpoints/")
+
+llm = PatchAndRouteLLM()
+llm.load_frozen_foundation()
+
+# Create orchestrator
+orchestrator = ParallelOrchestrator(
+    centroid_router=router,
+    llm=llm,
+    generation_config=GenerationConfig(max_new_tokens=256),
+    max_adapters=5,
+)
+
+# Run inference
+result = orchestrator.generate("How has the status changed over time?")
+print(result.response)             # Synthesized answer
+print(result.adapter_outputs)      # Per-adapter raw answers
+print(result.query_plan.plan_type) # MULTI_TEMPORAL
+```
+
+### Evaluation
+
+```bash
+# Basic parallel evaluation
+python eval_pnr.py \
+    --parallel \
+    --eval_sets base temporal \
+    --n_samples 200
+
+# With LLM query planner and custom adapter cap
+python eval_pnr.py \
+    --parallel \
+    --parallel_planner llm \
+    --parallel_max_adapters 3 \
+    --parallel_synth_tokens 512 \
+    --eval_sets base temporal geo_india \
+    --n_samples 100
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--parallel` | False | Enable Parallel Orchestrator mode |
+| `--parallel_max_adapters` | 5 | Max adapters for parallel execution |
+| `--parallel_planner` | `heuristic` | Query planner mode (`heuristic` or `llm`) |
+| `--parallel_synth_tokens` | 512 | Max tokens for synthesis pass |
+
+## MORPHEUS Architecture
+
+**MORPHEUS** (Multi-timescale Orchestrated Rehearsal with Prototype-routed Hierarchical Expert Unification System) is an advanced continual learning architecture that extends the PnR framework with six interconnected cognitive subsystems, inspired by biological memory consolidation.
+
+### Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                            MORPHEUS Architecture                             │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────────┐    ┌─────────────────────┐    ┌──────────────────┐    │
+│  │ System 6          │    │ System 2r            │    │ System 5          │    │
+│  │ Meta-Controller   │───▶│ Prototype Router     │───▶│ Knowledge Store   │    │
+│  │ ("Prefrontal")    │    │ (Non-parametric)     │    │ ("Episodic")      │    │
+│  └────────┬─────────┘    └──────────┬──────────┘    └────────┬─────────┘    │
+│           │                         │                         │              │
+│           ▼                         ▼                         ▼              │
+│  ┌──────────────────┐    ┌─────────────────────┐    ┌──────────────────┐    │
+│  │ System 3          │    │ System 2             │    │ System 1          │    │
+│  │ Fast Buffer       │    │ Expert Bank          │    │ Stable Core       │    │
+│  │ ("Hippocampus")   │    │ ("Cortical Columns") │    │ ("Neocortex")     │    │
+│  └────────┬─────────┘    └──────────┬──────────┘    └────────┬─────────┘    │
+│           │                         │                         │              │
+│           └─────────────┬───────────┘                         │              │
+│                         ▼                                     │              │
+│              ┌─────────────────────┐                          │              │
+│              │ System 4             │                          │              │
+│              │ Consolidation Engine │◀─────────────────────────┘              │
+│              │ ("Sleep / Dreaming") │                                         │
+│              └─────────────────────┘                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Subsystems
+
+| System | Name | Role | Timescale |
+|--------|------|------|-----------|
+| **1** | Stable Core | Versioned frozen foundation with CKA-bounded evolution | Slow (weeks) |
+| **2** | Expert Bank | Dynamic LoRA expert pool with lifecycle management | Medium (hours) |
+| **2r** | Prototype Router | Non-parametric routing with JL projection & hub mitigation | Instant |
+| **3** | Fast Buffer | High-plasticity scratch space for immediate data absorption | Fast (seconds) |
+| **4** | Consolidation Engine | Self-generated rehearsal and structural distillation | Medium (hours) |
+| **5** | Knowledge Store | Non-parametric fact database with graduated factuality override | Instant |
+| **6** | Meta-Controller | Orchestrates all systems via heuristic + RL policies | Meta (episodes) |
+
+### Quick Start
+
+```python
+from src.morpheus import MorpheusInference, MorpheusConfig
+
+config = MorpheusConfig()
+pipeline = MorpheusInference(config=config)
+result = pipeline.generate("Who is the Chancellor of Germany?")
+print(result.response)
+```
+
+### Evaluation
+
+```bash
+# Static inference evaluation (same metrics as PnR)
+python eval_pnr.py \
+    --morpheus \
+    --eval_sets base temporal \
+    --n_samples 200
+
+# Continual learning evaluation (forgetting curves, expert lifecycle)
+python eval_morpheus_continual.py \
+    --domains base temporal geo_india geo_france \
+    --n_samples 50 \
+    --output_dir eval_results/morpheus_continual
+
+# Routing-only evaluation (no LLM needed)
+python eval_morpheus_continual.py \
+    --domains base temporal \
+    --routing_only
+```
+
+### Testing
+
+```bash
+# Run all 165 MORPHEUS tests
+python -m pytest tests/morpheus/ -v
+
+# Run specific subsystem tests
+python -m pytest tests/morpheus/test_router.py -v       # Prototype Router
+python -m pytest tests/morpheus/test_expert_bank.py -v  # Expert Bank lifecycle
+python -m pytest tests/morpheus/test_meta_controller.py -v  # Meta-Controller
+python -m pytest tests/morpheus/test_integration.py -v  # Cross-subsystem integration
 ```
 
 ## VanillaRAG Deployment
@@ -579,9 +765,23 @@ PnR-framework/
 │   │   └── xlora_inference.py           # XLoRAInference wrapper (eval-compatible)
 │   ├── models/
 │   │   └── core.py                      # PatchAndRouteLLM model manager
+│   ├── morpheus/                        # MORPHEUS multi-system CL architecture
+│   │   ├── __init__.py                  # Package exports (all subsystems)
+│   │   ├── config.py                    # Configuration for all 6 subsystems
+│   │   ├── cka.py                       # Centered Kernel Alignment (linear + minibatch)
+│   │   ├── stable_core.py              # System 1: Versioned core with CKA-bounded updates
+│   │   ├── expert_bank.py              # System 2: Expert lifecycle (SHADOW→ACTIVE→FROZEN→DORMANT)
+│   │   ├── router.py                   # System 2r: Non-parametric prototype router (JL + EMA)
+│   │   ├── fast_buffer.py              # System 3: Hippocampal fast adaptation buffer
+│   │   ├── consolidation.py            # System 4: Interleaved consolidation engine
+│   │   ├── rehearsal.py                # System 4a: Self-generated rehearsal (anti-collapse)
+│   │   ├── knowledge_store.py          # System 5: Fact CRUD + graduated factuality override
+│   │   ├── meta_controller.py          # System 6: Orchestrator (heuristic + anomaly + staging)
+│   │   └── inference.py                # MorpheusInference pipeline (eval-compatible)
 │   ├── routing/
 │   │   ├── base.py                      # BaseRouter abstract class (Strategy Pattern)
 │   │   ├── centroid_router.py           # Time-Aware Centroid Router
+│   │   ├── parallel_orchestrator.py     # Parallel Orchestrator (ensemble & synthesis)
 │   │   ├── manifest.py                  # Adapter registration & centroids
 │   │   └── source_replay.py             # FAISS-based retrieval for T_old
 │   ├── training/
@@ -590,6 +790,16 @@ PnR-framework/
 │       ├── config.py                    # Configuration management
 │       ├── logging.py                   # Centralized logging
 │       └── mlflow_tracker.py            # MLflow experiment tracking (PnRTracker)
+├── tests/
+│   └── morpheus/                        # MORPHEUS test suite (165 tests)
+│       ├── test_config.py               # Configuration & enum tests
+│       ├── test_cka.py                  # CKA mathematical property tests
+│       ├── test_router.py               # Prototype router tests (JL, EMA, hubs)
+│       ├── test_expert_bank.py          # Expert lifecycle tests
+│       ├── test_fast_buffer.py          # Buffer capacity, shift detection tests
+│       ├── test_knowledge_store.py      # CRUD, factuality, rehearsal tests
+│       ├── test_meta_controller.py      # Heuristic policy, anomaly, staging tests
+│       └── test_integration.py          # Cross-subsystem interaction tests
 ├── scripts/
 │   ├── compute_centroids.py             # Offline centroid computation
 │   ├── merge_and_convert.sh             # Adapter → GGUF pipeline
@@ -598,6 +808,7 @@ PnR-framework/
 │   └── router_demo.py                   # Router demonstration
 ├── checkpoints/                         # Trained adapter checkpoints
 ├── eval_pnr.py                          # Evaluation CLI (EM, F1, routing, ESR, CFR)
+├── eval_morpheus_continual.py           # MORPHEUS continual learning evaluation
 ├── train_base_adapter.py                # SituatedQA training entry point
 ├── train_monolithic_baseline.py         # Monolithic JSON training
 ├── train_rag_baseline.py                # RAG baseline training
@@ -933,7 +1144,6 @@ Based on the Master's Thesis timeline (6 months).
 - [x] Knowledge Router implementation (Time-Aware Centroid Router)
 - [x] Conflict resolution (Source-Replay mechanism)
 - [x] Evaluation pipeline (`eval_pnr.py` — EM, F1, ESR, CFR, routing accuracy, LLM judge)
-- [ ] Parallel Orchestrator (Section 4.4.2)
 - [x] SituatedQA and CounterFact data loaders
 - [x] Chat template formatting for instruction tuning
 - [x] Configuration serialization (JSON)
@@ -943,38 +1153,57 @@ Based on the Master's Thesis timeline (6 months).
 - [x] QM corpus preprocessing (AIT proprietary data)
 
 ### Phase 2: Core Framework & Base Adapters (Month 2)
-- [ ] Expert Pool management system
+- [x] Train domain Base Adapters:
+  - [x] `base_v1` (pre-2019 stable facts + US geo — `checkpoints/base_v1/`)
+- [ ] Expert Pool management system (formal governance / domain selection API)
 - [ ] Two-Level Routing structure:
   - [ ] Level 1: Manual Domain Selection (UI "Hard Switch")
   - [ ] Level 2: Intelligent Dispatcher interface (Micro-Router)
-- [ ] Train domain Base Adapters:
-  - [ ] `SituatedQA_Base_Adapter_t1` (pre-2019 stable facts)
+- [ ] Train remaining Base Adapters:
   - [ ] `QM_Base_Adapter_v1` (AIT corpus)
 
 ### Phase 3: Router Architectures (Month 3)
-- [ ] **Time-Aware Centroid Router with Source-Replay** (embedding-based):
-  - [ ] Adapter centroid computation from training data
-  - [ ] Cosine similarity routing
-  - [ ] Scoped Retrieval for conflict resolution (RAG-augmented)
-- [ ] **Parallel-Orchestrator Architecture** (ensemble & synthesis):
-  - [ ] Intelligent Router (Query Planner)
-  - [ ] Parallel Execution Engine (multi-LoRA batch inference)
-  - [ ] Context Synthesis Agent (The Resolver)
+- [x] **Time-Aware Centroid Router with Source-Replay** (embedding-based):
+  - [x] Adapter centroid computation from training data
+  - [x] Cosine similarity routing
+  - [x] Scoped Retrieval for conflict resolution (RAG-augmented via FAISS)
+- [x] **Parallel-Orchestrator Architecture** (ensemble & synthesis):
+  - [x] Intelligent Router (Query Planner)
+  - [x] Parallel Execution Engine (sequential hot-swap)
+  - [x] Context Synthesis Agent (The Resolver)
+  - [x] Eval integration (`--parallel` flags in `eval_pnr.py`)
 - [ ] Probe-and-Judge conflict detection mechanism
-- [ ] X-LoRA baseline integration
+- [x] X-LoRA baseline integration
+- [x] **MORPHEUS Architecture** (multi-system cognitive CL):
+  - [x] System 1 — Stable Core with CKA-bounded versioning
+  - [x] System 2 — Expert Bank with lifecycle management
+  - [x] System 2r — Prototype Router (non-parametric, JL projection, hub mitigation)
+  - [x] System 3 — Fast Adaptation Buffer
+  - [x] System 4 — Consolidation Engine (interleaved rehearsal, structural distillation)
+  - [x] System 4a — Self-Generated Rehearsal with model-collapse safeguards
+  - [x] System 5 — Knowledge Store with graduated factuality override
+  - [x] System 6 — Meta-Controller (heuristic policy, anomaly detection, staged rollback)
+  - [x] MORPHEUS inference pipeline (eval-compatible)
 
 ### Phase 4: Knowledge Patches & Baselines (Month 4)
-- [ ] Train Knowledge Patches:
-  - [ ] Temporal patches for SituatedQA (post-2019 updates)
+- [x] Train Knowledge Patches:
+  - [x] Temporal patch (`patch_temp_2019_plus` — post-2019 updates)
+  - [x] Geographic patches (11 adapters: AU, CA, UK, US-CA, DE, FR, IN, NG, PK, England, Others)
+- [x] Implement baseline models:
+  - [x] Monolithic LoRA fine-tuning (`train_monolithic_baseline.py`)
+  - [x] LoRA + RAG hybrid (`train_rag_baseline.py`)
+- [ ] Train remaining Knowledge Patches:
   - [ ] QM updates (CEO changes, role modifications)
   - [ ] Counterfactual patches for controlled editing experiments
-- [ ] Implement baseline models:
-  - [ ] Monolithic LoRA fine-tuning
-  - [ ] LoRA + RAG hybrid
+- [ ] Implement remaining baselines:
   - [ ] L2R (Learning to Route)
-  - [ ] X-LoRA (soft-gating)
+  - [X] X-LoRA (soft-gating)
 
 ### Phase 5: Evaluation (Month 5)
+- [x] **MORPHEUS evaluation integration**:
+  - [x] `--morpheus` / `--morpheus_state_dir` flags in `eval_pnr.py`
+  - [x] Unit test suite (165 tests across 7 test files)
+  - [x] Continual learning evaluation script (`eval_morpheus_continual.py`)
 - [ ] **O2 - Efficiency**: Wall-clock time, GPU VRAM, FLOPs comparison
 - [ ] **O3a - Conflict Resolution**: ESR, flip/reversibility rates (CounterFact-Tracing)
 - [ ] **O3b - Cooperative Composition**: Multi-hop accuracy, synthesis quality

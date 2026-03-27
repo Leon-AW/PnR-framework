@@ -72,6 +72,7 @@ python train_xlora_baseline.py \
     --learning_rate 1e-4 \
     --logging_steps 10 \
     --save_steps 200 \
+    --quantization none \
     --experiment_name pnr-training \
     --run_name "xlora_baseline_${SLURM_JOB_ID}" \
     "$@"

@@ -142,6 +142,32 @@ def parse_args() -> argparse.Namespace:
         help="Path to X-LoRA gating checkpoint (replaces PnR routing with soft adapter blending)",
     )
 
+    # Parallel Orchestrator
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Use the Parallel-Orchestrator architecture (multi-adapter generation + synthesis)",
+    )
+    parser.add_argument(
+        "--parallel_max_adapters",
+        type=int,
+        default=5,
+        help="Maximum adapters for parallel execution",
+    )
+    parser.add_argument(
+        "--parallel_planner",
+        type=str,
+        choices=["heuristic", "llm"],
+        default="heuristic",
+        help="Query planner mode for the Parallel Orchestrator",
+    )
+    parser.add_argument(
+        "--parallel_synth_tokens",
+        type=int,
+        default=512,
+        help="Maximum tokens for the synthesis pass",
+    )
+
     # MORPHEUS architecture
     parser.add_argument(
         "--morpheus",
@@ -244,6 +270,10 @@ def main() -> None:
         monolithic_adapter=args.monolithic,
         no_adapter=args.no_adapter,
         xlora_checkpoint=args.xlora,
+        parallel_orchestrator=args.parallel,
+        parallel_max_adapters=args.parallel_max_adapters,
+        parallel_query_planner=args.parallel_planner,
+        parallel_synthesis_tokens=args.parallel_synth_tokens,
         morpheus=args.morpheus,
         morpheus_state_dir=args.morpheus_state_dir,
         max_new_tokens=args.max_new_tokens,
@@ -261,6 +291,12 @@ def main() -> None:
     logger.info(f"  Samples per split: {config.n_samples}")
     if config.no_adapter:
         logger.info("  Mode: Frozen base model only (no adapter, no routing) — CFR baseline")
+    elif config.parallel_orchestrator:
+        logger.info(
+            f"  Mode: Parallel Orchestrator "
+            f"(max_adapters={config.parallel_max_adapters}, "
+            f"planner={config.parallel_query_planner})"
+        )
     elif config.morpheus:
         logger.info(f"  Mode: MORPHEUS multi-system architecture")
         if config.morpheus_state_dir:

@@ -16,6 +16,12 @@ Reference: Section 4.4 of the Master's Thesis Exposé
 from .base import BaseRouter, RoutingResult, AdapterMatch
 from .centroid_router import CentroidRouter
 from .manifest import AdapterManifest, AdapterEntry
+from .parallel_orchestrator import (
+    ParallelOrchestrator,
+    OrchestratorResult,
+    QueryPlan,
+    QueryPlanType,
+)
 from .source_replay import SourceReplayStore
 
 __all__ = [
@@ -25,6 +31,10 @@ __all__ = [
     "CentroidRouter",
     "AdapterManifest",
     "AdapterEntry",
+    "ParallelOrchestrator",
+    "OrchestratorResult",
+    "QueryPlan",
+    "QueryPlanType",
     "SourceReplayStore",
 ]
 

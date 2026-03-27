@@ -197,6 +197,57 @@ Be concise and accurate."""
 
 
 # =============================================================================
+# Generation Utility
+# =============================================================================
+
+def generate_text(
+    model: PreTrainedModel | PeftModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt: str,
+    config: GenerationConfig,
+    use_gpu: bool = True,
+) -> str:
+    """Generate text from a prompt using a model and tokenizer.
+
+    Stateless utility that can be used by any component needing text generation
+    (PatchAndRouteInference, ParallelOrchestrator, etc.).
+
+    Args:
+        model: The model to generate with (base or PEFT-wrapped).
+        tokenizer: Tokenizer for encoding/decoding.
+        prompt: Full formatted prompt.
+        config: Generation parameters.
+        use_gpu: Whether to move inputs to GPU.
+
+    Returns:
+        Generated text (response only, prompt stripped).
+    """
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=4096,
+    )
+
+    if use_gpu:
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            **config.to_dict(),
+        )
+
+    prompt_length = inputs["input_ids"].shape[1]
+    response_tokens = outputs[0][prompt_length:]
+    response = tokenizer.decode(response_tokens, skip_special_tokens=True)
+
+    return response.strip()
+
+
+# =============================================================================
 # Main Inference Class
 # =============================================================================
 
@@ -409,42 +460,16 @@ class PatchAndRouteInference:
         config: GenerationConfig,
     ) -> str:
         """Generate text from a prompt.
-        
+
         Args:
             prompt: Full formatted prompt.
             config: Generation parameters.
-            
+
         Returns:
             Generated text (response only, prompt stripped).
         """
         model, tokenizer = self._llm.get_inference_components()
-        
-        # Tokenize
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=4096,
-        )
-        
-        if self.use_gpu:
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        
-        # Generate
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                **config.to_dict(),
-            )
-        
-        # Decode (remove prompt)
-        prompt_length = inputs["input_ids"].shape[1]
-        response_tokens = outputs[0][prompt_length:]
-        response = tokenizer.decode(response_tokens, skip_special_tokens=True)
-        
-        return response.strip()
+        return generate_text(model, tokenizer, prompt, config, use_gpu=self.use_gpu)
     
     # -------------------------------------------------------------------------
     # Batch Generation

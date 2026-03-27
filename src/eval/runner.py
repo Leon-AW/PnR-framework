@@ -101,6 +101,10 @@ class EvalConfig:
     xlora_checkpoint: str | None = None  # Path to X-LoRA gating checkpoint
     morpheus: bool = False  # Use MORPHEUS multi-system architecture
     morpheus_state_dir: str | None = None  # Path to MORPHEUS state directory
+    parallel_orchestrator: bool = False  # Use Parallel-Orchestrator architecture
+    parallel_max_adapters: int = 5  # Max adapters for parallel execution
+    parallel_query_planner: str = "heuristic"  # "heuristic" or "llm"
+    parallel_synthesis_tokens: int = 512  # Max tokens for synthesis pass
 
 
 # =============================================================================
@@ -264,12 +268,73 @@ class EvalRunner:
 
         return pipeline
 
+    def _build_parallel_pipeline(self):
+        """Build a ParallelOrchestrator pipeline.
+
+        Returns:
+            ParallelOrchestrator instance for multi-adapter parallel inference.
+        """
+        import torch
+        from src.inference import GenerationConfig
+        from src.models.core import FrozenFoundationConfig, PatchAndRouteLLM, QuantizationType
+        from src.routing import CentroidRouter, ParallelOrchestrator
+
+        quant_map = {"none": QuantizationType.NONE, "int8": QuantizationType.INT8, "int4": QuantizationType.INT4}
+        quantization = quant_map.get(self.config.quantization, QuantizationType.INT4)
+        use_gpu = self.config.use_gpu and torch.cuda.is_available()
+
+        # Build CentroidRouter (reuse embedding/manifest infrastructure)
+        if self.config.router_state_path and Path(self.config.router_state_path).exists():
+            router = CentroidRouter.load(
+                path=self.config.router_state_path,
+                embedding_model_path=self.config.embedding_model,
+                similarity_threshold=self.config.similarity_threshold,
+                use_gpu=use_gpu,
+            )
+        else:
+            router = CentroidRouter(
+                embedding_model_path=self.config.embedding_model,
+                similarity_threshold=self.config.similarity_threshold,
+                use_gpu=use_gpu,
+            )
+            checkpoints_dir = Path(self.config.checkpoints_dir)
+            if checkpoints_dir.exists():
+                n_registered = router.register_from_checkpoints(str(checkpoints_dir))
+                logger.info(f"Registered {n_registered} adapters from {checkpoints_dir}")
+
+        # Build PatchAndRouteLLM
+        llm_config = FrozenFoundationConfig(
+            model_id=self.config.model_id,
+            quantization=quantization,
+            use_cache=True,
+        )
+        llm = PatchAndRouteLLM(foundation_config=llm_config)
+        llm.load_frozen_foundation()
+
+        gen_config = GenerationConfig(
+            max_new_tokens=self.config.max_new_tokens,
+            temperature=self.config.temperature,
+            do_sample=self.config.do_sample,
+        )
+
+        return ParallelOrchestrator(
+            centroid_router=router,
+            llm=llm,
+            generation_config=gen_config,
+            query_planner_mode=self.config.parallel_query_planner,
+            max_adapters=self.config.parallel_max_adapters,
+            synthesis_max_new_tokens=self.config.parallel_synthesis_tokens,
+            use_gpu=use_gpu,
+        )
+
     def _build_pipeline(self):
-        """Build the inference pipeline (PnR, X-LoRA, or MORPHEUS).
+        """Build the inference pipeline (PnR, X-LoRA, MORPHEUS, or Parallel).
 
         Returns:
             Configured inference pipeline instance.
         """
+        if self.config.parallel_orchestrator:
+            return self._build_parallel_pipeline()
         if self.config.morpheus:
             return self._build_morpheus_pipeline()
         if self.config.xlora_checkpoint:
@@ -351,7 +416,9 @@ class EvalRunner:
         # Time the inference
         t_start = time.perf_counter()
 
-        if self.config.xlora_checkpoint:
+        if self.config.parallel_orchestrator:
+            result = pipeline.generate(query=sample.question)
+        elif self.config.xlora_checkpoint:
             result = pipeline.generate(query=sample.question)
         elif self.config.no_adapter:
             # Frozen base model only — skip routing and load no adapter.
@@ -382,7 +449,18 @@ class EvalRunner:
 
         # Routing correctness
         adapter_used = result.adapter_loaded
-        if self.config.morpheus:
+        if self.config.parallel_orchestrator:
+            # Parallel orchestrator may use multiple adapters (comma-separated)
+            if sample.expected_adapter is None:
+                routing_correct = True
+            else:
+                # Check if expected adapter is among those queried
+                used_set = set(adapter_used.split(",")) if adapter_used else set()
+                routing_correct = sample.expected_adapter in used_set
+            routing_result = result.routing_result
+            winner_sim = routing_result.winner_similarity if routing_result else None
+            has_conflict = routing_result.has_conflict if routing_result else False
+        elif self.config.morpheus:
             if sample.expected_adapter is None:
                 routing_correct = True
             else:
