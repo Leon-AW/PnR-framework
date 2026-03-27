@@ -35,3 +35,7 @@ sentence-transformers>=2.2.0  # For embedding models (KaLM, BGE, E5, etc.)
 tqdm>=4.66.0
 python-dotenv>=1.0.0
 
+# X-LoRA baseline (continuous adapter blending; arXiv:2402.07148)
+# Install with: pip install git+https://github.com/EricLBuehler/xlora.git
+xlora @ git+https://github.com/EricLBuehler/xlora.git
+

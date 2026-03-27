@@ -65,6 +65,9 @@ class EvalConfig:
         n_samples: Max samples per split.
         local_data_paths: Paths to local JSON files (for "local" split).
         monolithic_adapter: Path to monolithic adapter (bypasses routing).
+        no_adapter: Evaluate the frozen base model with no adapter and no routing.
+            Used as Pass 1 in the CFR two-pass protocol to measure the foundation
+            baseline before any patches are applied.
         max_new_tokens: Maximum tokens to generate per sample.
         temperature: Sampling temperature (low for reproducibility).
         do_sample: Whether to use sampling.
@@ -85,6 +88,7 @@ class EvalConfig:
     n_samples: int = 200
     local_data_paths: list[str] = field(default_factory=list)
     monolithic_adapter: str | None = None
+    no_adapter: bool = False  # Frozen base model only — no routing, no adapter (CFR baseline)
     max_new_tokens: int = 256
     temperature: float = 0.1
     do_sample: bool = False
@@ -94,6 +98,7 @@ class EvalConfig:
     output_dir: str = "eval_results"
     use_llm_judge: bool = False
     use_gpu: bool = True
+    xlora_checkpoint: str | None = None  # Path to X-LoRA gating checkpoint
 
 
 # =============================================================================
@@ -174,12 +179,35 @@ class EvalRunner:
     # Pipeline Construction
     # -------------------------------------------------------------------------
 
-    def _build_pipeline(self):
-        """Build the PatchAndRouteInference pipeline.
+    def _build_xlora_pipeline(self):
+        """Build an XLoRAInference pipeline.
 
         Returns:
-            Configured PatchAndRouteInference instance.
+            XLoRAInference instance wrapping the gating checkpoint.
         """
+        from src.inference.xlora_inference import XLoRAInference
+
+        import torch
+        use_gpu = self.config.use_gpu and torch.cuda.is_available()
+
+        return XLoRAInference(
+            xlora_checkpoint=self.config.xlora_checkpoint,
+            model_id=self.config.model_id,
+            quantization=self.config.quantization,
+            max_new_tokens=self.config.max_new_tokens,
+            temperature=self.config.temperature,
+            do_sample=self.config.do_sample,
+            use_gpu=use_gpu,
+        )
+
+    def _build_pipeline(self):
+        """Build the PatchAndRouteInference pipeline (or X-LoRA pipeline).
+
+        Returns:
+            Configured inference pipeline instance.
+        """
+        if self.config.xlora_checkpoint:
+            return self._build_xlora_pipeline()
         import torch
         from src.inference import PatchAndRouteInference, GenerationConfig
         from src.models.core import QuantizationType
@@ -257,7 +285,14 @@ class EvalRunner:
         # Time the inference
         t_start = time.perf_counter()
 
-        if self.config.monolithic_adapter:
+        if self.config.xlora_checkpoint:
+            result = pipeline.generate(query=sample.question)
+        elif self.config.no_adapter:
+            # Frozen base model only — skip routing and load no adapter.
+            # This is Pass 1 of the CFR protocol: measures what the foundation
+            # already knows, providing the true pre-patch baseline.
+            result = pipeline.generate(query=sample.question, skip_routing=True)
+        elif self.config.monolithic_adapter:
             result = pipeline.generate(
                 query=sample.question,
                 force_adapter=self.config.monolithic_adapter,
@@ -281,15 +316,25 @@ class EvalRunner:
 
         # Routing correctness
         adapter_used = result.adapter_loaded
-        if sample.expected_adapter is None:
+        if self.config.xlora_checkpoint:
+            # X-LoRA blends softly — no discrete routing to evaluate
             routing_correct = True
+            winner_sim = None
+            has_conflict = False
+        elif self.config.no_adapter:
+            # Base model only — routing deliberately skipped
+            routing_correct = True
+            winner_sim = None
+            has_conflict = False
         else:
-            routing_correct = adapter_used == sample.expected_adapter
+            if sample.expected_adapter is None:
+                routing_correct = True
+            else:
+                routing_correct = adapter_used == sample.expected_adapter
 
-        # Routing metadata
-        routing_result = result.routing_result
-        winner_sim = routing_result.winner_similarity if routing_result else None
-        has_conflict = routing_result.has_conflict if routing_result else False
+            routing_result = result.routing_result
+            winner_sim = routing_result.winner_similarity if routing_result else None
+            has_conflict = routing_result.has_conflict if routing_result else False
 
         return EvalResult(
             sample=sample,

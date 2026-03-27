@@ -288,6 +288,63 @@ python train_monolithic_baseline.py \
     --no_negatives
 ```
 
+### X-LoRA Baseline
+
+Continuous adapter blending (arXiv:2402.07148) — trains a learned gating classifier on top of existing LoRA adapters. No LoRA weights are updated; only the gating network learns to mix them per-layer at inference time.
+
+**Step 1 — install xlora** (one-time):
+
+```bash
+pip install git+https://github.com/EricLBuehler/xlora.git
+```
+
+**Step 2 — train the gating classifier** (reuses adapters already in `checkpoints/`):
+
+```bash
+python train_xlora_baseline.py \
+    --data_paths data/archive.json data/current.json \
+    --checkpoints_dir checkpoints/ \
+    --output_dir checkpoints/xlora_baseline \
+    --max_steps 2000 \
+    --run_name xlora_baseline
+```
+
+The script auto-discovers all LoRA adapters under `--checkpoints_dir` (any directory containing `adapter_config.json`). You can also list them explicitly with `--adapter_paths`.
+
+**Step 3 — evaluate**:
+
+```bash
+python eval_pnr.py \
+    --xlora checkpoints/xlora_baseline \
+    --eval_sets base temporal \
+    --n_samples 200 \
+    --run_name xlora_baseline
+```
+
+When `--xlora` is set, the eval runner uses `XLoRAInference` instead of the PnR router. Routing metrics are fixed at `routing_correct=True` and `winner_similarity=None` (X-LoRA blends softly — there is no discrete adapter selection to evaluate).
+
+#### Configuration Options (`train_xlora_baseline.py`)
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--data_paths` | Required | JSON files (same as monolithic) |
+| `--checkpoints_dir` | `checkpoints/` | Auto-discover LoRA adapters |
+| `--adapter_paths` | None | Override: explicit adapter directories |
+| `--xlora_depth` | `8` | Gating network depth |
+| `--output_dir` | `checkpoints/xlora_baseline` | Checkpoint directory |
+| `--max_steps` | `2000` | Training steps (same budget as other baselines) |
+| `--batch_size` | `1` | Per-device batch size |
+| `--gradient_accumulation` | `16` | Effective batch size = 16 |
+| `--learning_rate` | `1e-4` | Peak LR (lower than LoRA training — gating only) |
+| `--max_seq_length` | `4096` | Sequence length (matches other baselines) |
+| `--experiment_name` | `pnr-training` | MLflow experiment name |
+| `--run_name` | `xlora_baseline` | MLflow run name |
+
+The checkpoint directory contains:
+- `xlora_gating.pt` — trained gating weights
+- `xlora_config.json` — adapter paths + gating config for inference reconstruction
+- `training_config.json` — full training provenance
+
 ### RAG Baseline
 
 Separate adapters optimized for RAG retrieval context with noise injection:
@@ -439,7 +496,8 @@ python eval_pnr.py \
 | `--eval_sets` | `base temporal` | Splits: `base`, `temporal`, `geo_<country>`, `local` |
 | `--n_samples` | 200 | Max samples per split |
 | `--local_data_paths` | — | JSON files for `local` split |
-| `--monolithic` | None | Adapter path — bypasses routing (baseline mode) |
+| `--monolithic` | None | Adapter path — bypasses routing (monolithic baseline) |
+| `--xlora` | None | X-LoRA checkpoint path — replaces routing with soft blending |
 | `--similarity_threshold` | 0.65 | Router similarity threshold |
 | `--quantization` | `int4` | `none`, `int8`, `int4` |
 | `--max_new_tokens` | 256 | Tokens to generate per sample |
@@ -517,7 +575,8 @@ PnR-framework/
 │   │   ├── embeddings.py                # Embedding model wrapper
 │   │   ├── vector_store.py              # FAISS/ChromaDB backends
 │   │   ├── merge_adapter.py             # LoRA → merged model
-│   │   └── convert_to_gguf.py           # Merged → GGUF conversion
+│   │   ├── convert_to_gguf.py           # Merged → GGUF conversion
+│   │   └── xlora_inference.py           # XLoRAInference wrapper (eval-compatible)
 │   ├── models/
 │   │   └── core.py                      # PatchAndRouteLLM model manager
 │   ├── routing/
@@ -542,6 +601,7 @@ PnR-framework/
 ├── train_base_adapter.py                # SituatedQA training entry point
 ├── train_monolithic_baseline.py         # Monolithic JSON training
 ├── train_rag_baseline.py                # RAG baseline training
+├── train_xlora_baseline.py              # X-LoRA gating classifier training
 ├── interactive_inference.py             # Interactive routing demo
 ├── environment.yml                      # Conda environment (Python 3.11)
 ├── requirements.txt                     # Pip dependencies (fallback)

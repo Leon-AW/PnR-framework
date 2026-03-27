@@ -117,12 +117,29 @@ def parse_args() -> argparse.Namespace:
         help="Quantization type for memory efficiency",
     )
 
-    # Monolithic baseline
+    # Baseline modes
     parser.add_argument(
         "--monolithic",
         type=str,
         default=None,
         help="Path to monolithic adapter (bypasses routing for baseline comparison)",
+    )
+    parser.add_argument(
+        "--no_adapter",
+        action="store_true",
+        help=(
+            "Evaluate the frozen base model with no adapter and no routing. "
+            "Use as Pass 1 of the CFR two-pass protocol to get the foundation "
+            "baseline before any patches are applied."
+        ),
+    )
+
+    # X-LoRA baseline
+    parser.add_argument(
+        "--xlora",
+        type=str,
+        default=None,
+        help="Path to X-LoRA gating checkpoint (replaces PnR routing with soft adapter blending)",
     )
 
     # Generation configuration
@@ -212,6 +229,8 @@ def main() -> None:
         n_samples=args.n_samples,
         local_data_paths=args.local_data_paths,
         monolithic_adapter=args.monolithic,
+        no_adapter=args.no_adapter,
+        xlora_checkpoint=args.xlora,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         do_sample=False,
@@ -225,7 +244,14 @@ def main() -> None:
     logger.info(f"  Quantization: {config.quantization}")
     logger.info(f"  Eval sets: {config.eval_sets}")
     logger.info(f"  Samples per split: {config.n_samples}")
-    logger.info(f"  Monolithic adapter: {config.monolithic_adapter or 'None (using routing)'}")
+    if config.no_adapter:
+        logger.info("  Mode: Frozen base model only (no adapter, no routing) — CFR baseline")
+    elif config.xlora_checkpoint:
+        logger.info(f"  Mode: X-LoRA — {config.xlora_checkpoint}")
+    elif config.monolithic_adapter:
+        logger.info(f"  Mode: Monolithic adapter — {config.monolithic_adapter}")
+    else:
+        logger.info("  Mode: PnR routing")
     logger.info(f"  LLM Judge: {config.use_llm_judge}")
     logger.info(f"  Output: {config.output_dir}")
     logger.info("=" * 70)

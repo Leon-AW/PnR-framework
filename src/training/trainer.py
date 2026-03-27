@@ -118,6 +118,10 @@ class TrainingConfig:
     
     # Logging (use "none" to avoid tensorboard dependency issues)
     report_to: list[str] = field(default_factory=lambda: ["none"])
+
+    # Progress bars — disable_tqdm=False keeps them on even in non-TTY environments
+    # (e.g. SLURM log files). Steps are then visible via `tail -f *.out`.
+    disable_tqdm: bool = False
     
     # Streaming-specific
     dataset_buffer_size: int = 10_000  # Shuffle buffer for streaming
@@ -167,6 +171,7 @@ class TrainingConfig:
             dataloader_pin_memory=self.dataloader_pin_memory,
             seed=self.seed,
             report_to=self.report_to,
+            disable_tqdm=self.disable_tqdm,
             # Streaming-specific settings
             max_grad_norm=1.0,
             remove_unused_columns=False,  # Important for custom formatting
@@ -205,6 +210,7 @@ class TrainingConfig:
             dataloader_pin_memory=self.dataloader_pin_memory,
             seed=self.seed,
             report_to=self.report_to,
+            disable_tqdm=self.disable_tqdm,
             max_grad_norm=1.0,
             remove_unused_columns=False,
             # SFT-specific settings

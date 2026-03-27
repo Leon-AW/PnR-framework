@@ -34,6 +34,7 @@ class RoutingStrategy(Enum):
     CENTROID = "centroid"           # Time-Aware Centroid Router (Section 4.4.1)
     PARALLEL = "parallel"           # Parallel Orchestrator (Section 4.4.2) - Future
     ENSEMBLE = "ensemble"           # Ensemble voting - Future
+    MORPHEUS = "morpheus"           # MORPHEUS prototype-based router (Section 4.4.3)
 
 
 @dataclass
