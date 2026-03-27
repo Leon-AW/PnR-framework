@@ -142,6 +142,19 @@ def parse_args() -> argparse.Namespace:
         help="Path to X-LoRA gating checkpoint (replaces PnR routing with soft adapter blending)",
     )
 
+    # MORPHEUS architecture
+    parser.add_argument(
+        "--morpheus",
+        action="store_true",
+        help="Use the MORPHEUS multi-system architecture (prototype-based routing, knowledge store, meta-controller)",
+    )
+    parser.add_argument(
+        "--morpheus_state_dir",
+        type=str,
+        default=None,
+        help="Path to MORPHEUS state directory (router state, expert bank, knowledge store)",
+    )
+
     # Generation configuration
     parser.add_argument(
         "--max_new_tokens",
@@ -231,6 +244,8 @@ def main() -> None:
         monolithic_adapter=args.monolithic,
         no_adapter=args.no_adapter,
         xlora_checkpoint=args.xlora,
+        morpheus=args.morpheus,
+        morpheus_state_dir=args.morpheus_state_dir,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         do_sample=False,
@@ -246,6 +261,10 @@ def main() -> None:
     logger.info(f"  Samples per split: {config.n_samples}")
     if config.no_adapter:
         logger.info("  Mode: Frozen base model only (no adapter, no routing) — CFR baseline")
+    elif config.morpheus:
+        logger.info(f"  Mode: MORPHEUS multi-system architecture")
+        if config.morpheus_state_dir:
+            logger.info(f"         State dir: {config.morpheus_state_dir}")
     elif config.xlora_checkpoint:
         logger.info(f"  Mode: X-LoRA — {config.xlora_checkpoint}")
     elif config.monolithic_adapter:

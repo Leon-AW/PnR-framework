@@ -366,7 +366,7 @@ class PrototypeRouter(BaseRouter):
         scored.sort(key=lambda x: x[1], reverse=True)
         scored = scored[:top_k]
 
-        # Build matches
+        # Build matches (clamp similarity to [0,1] for AdapterMatch compatibility)
         matches = []
         for eid, sim in scored:
             if sim < self.config.similarity_threshold:
@@ -374,7 +374,7 @@ class PrototypeRouter(BaseRouter):
             proto = active[eid]
             matches.append(AdapterMatch(
                 adapter_id=eid,
-                similarity=sim,
+                similarity=float(np.clip(sim, 0.0, 1.0)),
                 timestamp=proto.timestamp,
                 is_winner=False,
             ))

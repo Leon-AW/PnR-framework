@@ -99,6 +99,8 @@ class EvalConfig:
     use_llm_judge: bool = False
     use_gpu: bool = True
     xlora_checkpoint: str | None = None  # Path to X-LoRA gating checkpoint
+    morpheus: bool = False  # Use MORPHEUS multi-system architecture
+    morpheus_state_dir: str | None = None  # Path to MORPHEUS state directory
 
 
 # =============================================================================
@@ -200,12 +202,76 @@ class EvalRunner:
             use_gpu=use_gpu,
         )
 
+    def _build_morpheus_pipeline(self):
+        """Build a MorpheusInference pipeline.
+
+        Returns:
+            MorpheusInference instance using the MORPHEUS multi-system architecture.
+        """
+        from src.morpheus import (
+            MorpheusInference,
+            MorpheusConfig,
+            MorpheusGenerationConfig,
+            StableCoreConfig,
+            PrototypeRouterConfig,
+        )
+        import torch
+
+        use_gpu = self.config.use_gpu and torch.cuda.is_available()
+
+        core_config = StableCoreConfig(
+            model_id=self.config.model_id,
+            quantization=self.config.quantization,
+        )
+        router_config = PrototypeRouterConfig(
+            embedding_model_path=self.config.embedding_model,
+            similarity_threshold=self.config.similarity_threshold,
+            use_gpu=use_gpu,
+        )
+        morpheus_config = MorpheusConfig(
+            stable_core=core_config,
+            router=router_config,
+        )
+        if self.config.morpheus_state_dir:
+            morpheus_config.state_dir = self.config.morpheus_state_dir
+
+        gen_config = MorpheusGenerationConfig(
+            max_new_tokens=self.config.max_new_tokens,
+            temperature=self.config.temperature,
+            do_sample=self.config.do_sample,
+        )
+
+        pipeline = MorpheusInference(
+            config=morpheus_config,
+            generation_config=gen_config,
+        )
+
+        # Register adapters from checkpoints directory
+        checkpoints_dir = Path(self.config.checkpoints_dir)
+        if checkpoints_dir.exists():
+            router = pipeline.get_router()
+            n_registered = 0
+            for adapter_dir in sorted(checkpoints_dir.iterdir()):
+                if adapter_dir.is_dir() and (adapter_dir / "adapter_config.json").exists():
+                    adapter_id = adapter_dir.name
+                    router.register_adapter(
+                        adapter_id=adapter_id,
+                        path=str(adapter_dir),
+                        timestamp=adapter_dir.stat().st_mtime,
+                    )
+                    n_registered += 1
+            logger.info(f"Registered {n_registered} adapters with MORPHEUS router")
+
+        return pipeline
+
     def _build_pipeline(self):
-        """Build the PatchAndRouteInference pipeline (or X-LoRA pipeline).
+        """Build the inference pipeline (PnR, X-LoRA, or MORPHEUS).
 
         Returns:
             Configured inference pipeline instance.
         """
+        if self.config.morpheus:
+            return self._build_morpheus_pipeline()
         if self.config.xlora_checkpoint:
             return self._build_xlora_pipeline()
         import torch
@@ -316,7 +382,15 @@ class EvalRunner:
 
         # Routing correctness
         adapter_used = result.adapter_loaded
-        if self.config.xlora_checkpoint:
+        if self.config.morpheus:
+            if sample.expected_adapter is None:
+                routing_correct = True
+            else:
+                routing_correct = adapter_used == sample.expected_adapter
+            routing_result = result.routing_result
+            winner_sim = routing_result.winner_similarity if routing_result else None
+            has_conflict = routing_result.has_conflict if routing_result else False
+        elif self.config.xlora_checkpoint:
             # X-LoRA blends softly — no discrete routing to evaluate
             routing_correct = True
             winner_sim = None
