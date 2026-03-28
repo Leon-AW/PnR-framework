@@ -201,7 +201,7 @@ class EvalRunner:
         """
         import json
         import torch
-        from src.inference.rledit_inference import RLEditInference
+        from src.baselines.rledit import RLEditInference
 
         use_gpu = self.config.use_gpu and torch.cuda.is_available()
 
@@ -248,7 +248,7 @@ class EvalRunner:
         """
         import json
         import torch
-        from src.inference.recipe_inference import RECIPEInference
+        from src.baselines.recipe import RECIPEInference
 
         use_gpu = self.config.use_gpu and torch.cuda.is_available()
 
@@ -290,7 +290,7 @@ class EvalRunner:
         Returns:
             XLoRAInference instance wrapping the gating checkpoint.
         """
-        from src.inference.xlora_inference import XLoRAInference
+        from src.baselines.xlora import XLoRAInference
 
         import torch
         use_gpu = self.config.use_gpu and torch.cuda.is_available()

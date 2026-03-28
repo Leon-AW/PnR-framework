@@ -2,16 +2,18 @@
 Inference Package
 =================
 
-Provides inference utilities for the Patch-and-Route framework.
+Provides the PnR inference pipeline and supporting utilities.
 
 Modules:
+- pnr:         PatchAndRouteInference — main end-to-end inference class
 - vanilla_rag: Standalone RAG pipeline for document Q&A
-- embeddings: Embedding model wrapper
+- embeddings:  Embedding model wrapper
 - vector_store: Vector storage backends (FAISS, ChromaDB)
 - merge_adapter: LoRA adapter merging
 - convert_to_gguf: GGUF format conversion
 """
 
+from src.inference.pnr import PatchAndRouteInference, GenerationConfig
 from src.inference.vanilla_rag import VanillaRAG, VanillaRAGConfig
 from src.inference.embeddings import EmbeddingModel, EmbeddingConfig
 from src.inference.vector_store import (
@@ -24,7 +26,10 @@ from src.inference.vector_store import (
 )
 
 __all__ = [
-    # Main RAG
+    # PnR inference (was src/inference.py — now src/inference/pnr.py)
+    "PatchAndRouteInference",
+    "GenerationConfig",
+    # RAG
     "VanillaRAG",
     "VanillaRAGConfig",
     # Embeddings

@@ -75,7 +75,7 @@ from torch.optim import AdamW
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.inference.rledit_inference import RLEditConfig, RLEditHypernetwork
+from src.baselines.rledit import RLEditConfig, RLEditHypernetwork
 from src.utils.logging import setup_logger, configure_framework_logging
 
 logger = logging.getLogger(__name__)

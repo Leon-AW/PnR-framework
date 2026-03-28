@@ -19,7 +19,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.data_loaders import StructureAwareChunker, StructuredChunkConfig
+from src.data import StructureAwareChunker, StructuredChunkConfig
 from src.inference.embeddings import EmbeddingModel, EmbeddingConfig
 from src.inference.vector_store import FAISSVectorStore, ChromaVectorStore, FAISSConfig, ChromaConfig
 

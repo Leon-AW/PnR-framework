@@ -61,7 +61,7 @@ EOF
 # ------------------------------------------------------------------------------
 # Training
 # ------------------------------------------------------------------------------
-python train_xlora_baseline.py \
+python train/train_xlora_baseline.py \
     --model_id mistralai/Mistral-7B-Instruct-v0.3 \
     --checkpoints_dir checkpoints/ \
     --output_dir checkpoints/xlora_baseline \

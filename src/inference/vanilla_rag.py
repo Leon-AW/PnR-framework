@@ -104,7 +104,7 @@ class VanillaRAG:
     def chunker(self):
         """Get the document chunker (lazy-loaded)."""
         if self._chunker is None:
-            from src.data_loaders.structure_aware_chunker import (
+            from src.data.structure_aware_chunker import (
                 StructureAwareChunker,
                 StructuredChunkConfig,
             )

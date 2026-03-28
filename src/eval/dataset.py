@@ -162,7 +162,7 @@ def build_local_json_dataset(
     Returns:
         List of EvalSample instances.
     """
-    from src.data_loaders.local_loader import LocalJSONLoader, LocalJSONConfig
+    from src.data.local_loader import LocalJSONLoader, LocalJSONConfig
 
     config = LocalJSONConfig(
         data_paths=data_paths,
