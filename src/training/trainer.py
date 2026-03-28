@@ -126,6 +126,9 @@ class TrainingConfig:
     # Streaming-specific
     dataset_buffer_size: int = 10_000  # Shuffle buffer for streaming
 
+    # Gradient clipping
+    max_grad_norm: float = 1.0
+
     # Regularization (Generalization)
     neftune_noise_alpha: float | None = 5.0  # NEFTune noise for better generalization
 
@@ -173,7 +176,7 @@ class TrainingConfig:
             report_to=self.report_to,
             disable_tqdm=self.disable_tqdm,
             # Streaming-specific settings
-            max_grad_norm=1.0,
+            max_grad_norm=self.max_grad_norm,
             remove_unused_columns=False,  # Important for custom formatting
         )
     
@@ -211,7 +214,7 @@ class TrainingConfig:
             seed=self.seed,
             report_to=self.report_to,
             disable_tqdm=self.disable_tqdm,
-            max_grad_norm=1.0,
+            max_grad_norm=self.max_grad_norm,
             remove_unused_columns=False,
             # SFT-specific settings
             max_length=self.max_seq_length,  # TRL 0.27+ renamed max_seq_length to max_length

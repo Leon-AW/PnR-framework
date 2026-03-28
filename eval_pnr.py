@@ -142,6 +142,28 @@ def parse_args() -> argparse.Namespace:
         help="Path to X-LoRA gating checkpoint (replaces PnR routing with soft adapter blending)",
     )
 
+    # RLEdit baseline
+    parser.add_argument(
+        "--rledit",
+        type=str,
+        default=None,
+        help=(
+            "Path to RLEdit hypernetwork checkpoint directory produced by "
+            "train_rledit_baseline.py (contains rledit_hypernetwork.pt + rledit_config.json). "
+            "Applies direct weight edits via a trained RL hypernetwork."
+        ),
+    )
+    parser.add_argument(
+        "--rledit_edits",
+        type=str,
+        default=None,
+        help=(
+            "Path to JSON file with edit pairs to apply before evaluation. "
+            "Each entry: {\"question\": str, \"answer\": str} or [question, answer]. "
+            "If omitted, evaluates the unedited base model through the hypernetwork."
+        ),
+    )
+
     # Parallel Orchestrator
     parser.add_argument(
         "--parallel",
@@ -166,6 +188,29 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
         help="Maximum tokens for the synthesis pass",
+    )
+
+    # RECIPE baseline
+    parser.add_argument(
+        "--recipe",
+        type=str,
+        default=None,
+        help=(
+            "Path to RECIPE module checkpoint directory produced by "
+            "train_recipe_baseline.py (contains recipe_module.pt + recipe_config.json). "
+            "Applies lifelong knowledge editing via retrieval-augmented continuous prompts."
+        ),
+    )
+    parser.add_argument(
+        "--recipe_edits",
+        type=str,
+        default=None,
+        help=(
+            "Path to JSON file with knowledge edits to load into the RECIPE repository "
+            "before evaluation.  Each entry: {\"question\": str, \"answer\": str}. "
+            "If omitted, evaluates the base model through the trained RECIPE module "
+            "with an empty repository (no edits applied)."
+        ),
     )
 
     # MORPHEUS architecture
@@ -276,6 +321,10 @@ def main() -> None:
         parallel_synthesis_tokens=args.parallel_synth_tokens,
         morpheus=args.morpheus,
         morpheus_state_dir=args.morpheus_state_dir,
+        rledit_checkpoint=args.rledit,
+        rledit_edits_path=args.rledit_edits,
+        recipe_checkpoint=args.recipe,
+        recipe_edits_path=args.recipe_edits,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         do_sample=False,
@@ -301,6 +350,14 @@ def main() -> None:
         logger.info(f"  Mode: MORPHEUS multi-system architecture")
         if config.morpheus_state_dir:
             logger.info(f"         State dir: {config.morpheus_state_dir}")
+    elif config.recipe_checkpoint:
+        logger.info(f"  Mode: RECIPE — {config.recipe_checkpoint}")
+        if config.recipe_edits_path:
+            logger.info(f"         Edits: {config.recipe_edits_path}")
+    elif config.rledit_checkpoint:
+        logger.info(f"  Mode: RLEdit — {config.rledit_checkpoint}")
+        if config.rledit_edits_path:
+            logger.info(f"         Edits: {config.rledit_edits_path}")
     elif config.xlora_checkpoint:
         logger.info(f"  Mode: X-LoRA — {config.xlora_checkpoint}")
     elif config.monolithic_adapter:

@@ -105,6 +105,10 @@ class EvalConfig:
     parallel_max_adapters: int = 5  # Max adapters for parallel execution
     parallel_query_planner: str = "heuristic"  # "heuristic" or "llm"
     parallel_synthesis_tokens: int = 512  # Max tokens for synthesis pass
+    rledit_checkpoint: str | None = None  # Path to RLEdit hypernetwork checkpoint
+    rledit_edits_path: str | None = None  # JSON file with edit pairs to apply before eval
+    recipe_checkpoint: str | None = None  # Path to RECIPE module checkpoint directory
+    recipe_edits_path: str | None = None  # JSON file with knowledge edits for RECIPE repository
 
 
 # =============================================================================
@@ -184,6 +188,101 @@ class EvalRunner:
     # -------------------------------------------------------------------------
     # Pipeline Construction
     # -------------------------------------------------------------------------
+
+    def _build_rledit_pipeline(self):
+        """Build an RLEditInference pipeline.
+
+        Loads the trained RLEdit hypernetwork checkpoint and, if --rledit_edits
+        is provided, pre-applies all edit pairs to the base model via the
+        hypernetwork before evaluation begins.
+
+        Returns:
+            RLEditInference instance with edits applied.
+        """
+        import json
+        import torch
+        from src.inference.rledit_inference import RLEditInference
+
+        use_gpu = self.config.use_gpu and torch.cuda.is_available()
+
+        pipeline = RLEditInference(
+            checkpoint_dir=self.config.rledit_checkpoint,
+            model_id=self.config.model_id,
+            quantization=self.config.quantization,
+            max_new_tokens=self.config.max_new_tokens,
+            temperature=self.config.temperature,
+            do_sample=self.config.do_sample,
+            use_gpu=use_gpu,
+        )
+
+        if self.config.rledit_edits_path:
+            edits_path = Path(self.config.rledit_edits_path)
+            if not edits_path.exists():
+                raise FileNotFoundError(
+                    f"RLEdit edits file not found: {edits_path}"
+                )
+            with open(edits_path) as f:
+                edits = json.load(f)
+            logger.info(
+                "Applying %d RLEdit edits from %s ...", len(edits), edits_path
+            )
+            pipeline.apply_edits(edits)
+            logger.info("RLEdit: all edits applied.")
+        else:
+            logger.info(
+                "No --rledit_edits provided; evaluating base model "
+                "without pre-applied edits."
+            )
+
+        return pipeline
+
+    def _build_recipe_pipeline(self):
+        """Build a RECIPEInference pipeline.
+
+        Loads the trained RECIPE module checkpoint and, if --recipe_edits is
+        provided, populates the knowledge retrieval repository with all edit
+        pairs before evaluation begins.
+
+        Returns:
+            RECIPEInference instance with knowledge repository pre-populated.
+        """
+        import json
+        import torch
+        from src.inference.recipe_inference import RECIPEInference
+
+        use_gpu = self.config.use_gpu and torch.cuda.is_available()
+
+        pipeline = RECIPEInference(
+            checkpoint_dir=self.config.recipe_checkpoint,
+            model_id=self.config.model_id,
+            quantization=self.config.quantization,
+            max_new_tokens=self.config.max_new_tokens,
+            temperature=self.config.temperature,
+            do_sample=self.config.do_sample,
+            use_gpu=use_gpu,
+        )
+
+        if self.config.recipe_edits_path:
+            edits_path = Path(self.config.recipe_edits_path)
+            if not edits_path.exists():
+                raise FileNotFoundError(
+                    f"RECIPE edits file not found: {edits_path}"
+                )
+            with open(edits_path) as f:
+                edits = json.load(f)
+            logger.info(
+                "Populating RECIPE repository with %d edits from %s ...",
+                len(edits), edits_path,
+            )
+            pipeline.apply_edits(edits)
+            logger.info("RECIPE: repository populated (%d entries).", len(edits))
+        else:
+            logger.info(
+                "No --recipe_edits provided; evaluating with empty knowledge "
+                "repository (base model behaviour, no editing applied)."
+            )
+
+        return pipeline
 
     def _build_xlora_pipeline(self):
         """Build an XLoRAInference pipeline.
@@ -337,6 +436,10 @@ class EvalRunner:
             return self._build_parallel_pipeline()
         if self.config.morpheus:
             return self._build_morpheus_pipeline()
+        if self.config.recipe_checkpoint:
+            return self._build_recipe_pipeline()
+        if self.config.rledit_checkpoint:
+            return self._build_rledit_pipeline()
         if self.config.xlora_checkpoint:
             return self._build_xlora_pipeline()
         import torch
@@ -418,6 +521,10 @@ class EvalRunner:
 
         if self.config.parallel_orchestrator:
             result = pipeline.generate(query=sample.question)
+        elif self.config.recipe_checkpoint:
+            result = pipeline.generate(query=sample.question)
+        elif self.config.rledit_checkpoint:
+            result = pipeline.generate(query=sample.question)
         elif self.config.xlora_checkpoint:
             result = pipeline.generate(query=sample.question)
         elif self.config.no_adapter:
@@ -468,6 +575,16 @@ class EvalRunner:
             routing_result = result.routing_result
             winner_sim = routing_result.winner_similarity if routing_result else None
             has_conflict = routing_result.has_conflict if routing_result else False
+        elif self.config.recipe_checkpoint:
+            # RECIPE retrieves continuous prompts — no discrete adapter routing
+            routing_correct = True
+            winner_sim = None
+            has_conflict = False
+        elif self.config.rledit_checkpoint:
+            # RLEdit edits weights directly — no discrete routing
+            routing_correct = True
+            winner_sim = None
+            has_conflict = False
         elif self.config.xlora_checkpoint:
             # X-LoRA blends softly — no discrete routing to evaluate
             routing_correct = True

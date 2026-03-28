@@ -179,6 +179,12 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Steps between logging",
     )
+    parser.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=1.0,
+        help="Gradient clipping max norm (paper uses 0.3)",
+    )
 
     # MLflow
     parser.add_argument(
@@ -368,7 +374,7 @@ def main() -> None:
     base_model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map={"": 0},
         trust_remote_code=True,
         torch_dtype=torch.bfloat16 if bnb_config is None else None,
     )
@@ -391,6 +397,9 @@ def main() -> None:
         device=torch.device(device),
         adapters=adapters,
         xlora_depth=args.xlora_depth,
+        layerwise_scalings=True,       # predict per-layer scalings (paper: Λ ∈ R^{s×l×n})
+        enable_relu_and_dropout=True,  # ReLU + Dropout(0.2) between layers
+        xlora_dropout_p=0.2,           # matches paper's p=0.2
         use_trainable_adapters=False,  # freeze LoRA weights, train gating only
     )
 
@@ -425,11 +434,13 @@ def main() -> None:
         max_seq_length=args.max_seq_length,
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
+        max_grad_norm=args.max_grad_norm,
         eval_strategy="no",
         load_best_model_at_end=False,
         seed=args.seed,
         mlflow_experiment=args.experiment_name,
         mlflow_run_name=args.run_name or "xlora_baseline",
+        neftune_noise_alpha=None,  # disabled: NEFTune is for full fine-tuning, not gating classifier training
     )
 
     # SituatedQA stream already has a 'text' field from format_stream()
@@ -441,6 +452,22 @@ def main() -> None:
         config=training_config,
         formatting_func=None,  # stream already formatted
     )
+
+    # Print metrics to stdout so they appear in the SLURM .out log file
+    from transformers import TrainerCallback
+    class StdoutMetricsCallback(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs is None:
+                return
+            step = state.global_step
+            parts = [f"step={step:>5}"]
+            for k in ["loss", "mean_token_accuracy", "entropy", "grad_norm", "learning_rate"]:
+                if k in logs:
+                    parts.append(f"{k}={logs[k]:.4f}")
+            print(" | ".join(parts), flush=True)
+
+    trainer.build_trainer()
+    trainer.trainer.add_callback(StdoutMetricsCallback())
 
     metrics = trainer.train()
 
