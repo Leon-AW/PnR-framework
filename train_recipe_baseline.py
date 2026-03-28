@@ -39,14 +39,14 @@ Usage
     # Full training
     python train_recipe_baseline.py \\
         --data_path data/recipe_edits.json \\
-        --model_id deepseek-ai/DeepSeek-R1-Distill-Qwen-14B \\
+        --model_id mistralai/Mistral-7B-Instruct-v0.3 \\
         --output_dir checkpoints/recipe_baseline \\
         --n_epochs 5 --batch_size 8
 
     # Smoke test (small data, few epochs)
     python train_recipe_baseline.py \\
         --data_path data/recipe_edits.json \\
-        --model_id deepseek-ai/DeepSeek-R1-Distill-Qwen-14B \\
+        --model_id mistralai/Mistral-7B-Instruct-v0.3 \\
         --n_epochs 2 --batch_size 4 --max_samples 100
 
 Data Format
@@ -127,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_id",
         type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        default="mistralai/Mistral-7B-Instruct-v0.3",
         help="HuggingFace model ID for the frozen base LLM",
     )
     parser.add_argument(

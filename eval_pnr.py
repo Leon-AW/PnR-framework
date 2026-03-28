@@ -20,7 +20,7 @@ Usage:
         --eval_sets         Splits to evaluate (base, temporal, geo_india, local, ...)
         --n_samples         Max samples per split (default: 200)
         --local_data_paths  JSON files for "local" split
-        --model_id          Base model (default: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B)
+        --model_id          Base model (default: mistralai/Mistral-7B-Instruct-v0.3)
         --checkpoints_dir   Adapter checkpoints directory
         --monolithic        Path to monolithic adapter (bypasses routing)
         --use_llm_judge     Enable LLM-as-a-judge scoring
@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_id",
         type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        default="mistralai/Mistral-7B-Instruct-v0.3",
         help="HuggingFace model identifier",
     )
     parser.add_argument(

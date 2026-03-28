@@ -103,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_id",
         type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        default="mistralai/Mistral-7B-Instruct-v0.3",
         help="HuggingFace model identifier",
     )
     parser.add_argument(
@@ -195,7 +195,7 @@ def parse_args() -> argparse.Namespace:
         help="Logging verbosity",
     )
     
-    # Chain-of-Thought (DeepSeek-R1)
+    # Chain-of-Thought
     parser.add_argument(
         "--no_chain_of_thought",
         action="store_true",
@@ -263,7 +263,7 @@ def validate_gpu_configuration() -> None:
 
     if memory_gb < 20:
         print(f"[WARNING] Device 0 has only {memory_gb:.1f} GB VRAM.")
-        print("          DeepSeek-R1-14B with 4-bit quantization needs ~18-20 GB.")
+        print("          Mistral-7B-Instruct with 4-bit quantization needs ~6-8 GB.")
         print("          Training may fail with OOM errors.")
     else:
         print(f"[OK] Device 0: {props.name} with {memory_gb:.1f} GB VRAM")
@@ -310,7 +310,7 @@ def main() -> None:
         include_negatives=include_negatives,
         validation_split=args.validation_split,
         language_filter=args.language_filter,
-        user_prefix=args.system_prompt,  # DeepSeek-R1: No system prompt, use as user prefix
+        user_prefix=args.system_prompt,
         seed=args.seed,
         use_chain_of_thought=not args.no_chain_of_thought,  # Enable CoT by default
     )

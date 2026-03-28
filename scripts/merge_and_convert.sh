@@ -24,7 +24,7 @@ fi
 
 # Default configuration
 ADAPTER_PATH="${ADAPTER_PATH:-checkpoints/QM_rag/checkpoint-1000}"
-BASE_MODEL="${BASE_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-14B}"
+BASE_MODEL="${BASE_MODEL:-mistralai/Mistral-7B-Instruct-v0.3}"
 MERGED_OUTPUT="${MERGED_OUTPUT:-checkpoints/QM_rag/merged}"
 GGUF_OUTPUT="${GGUF_OUTPUT:-checkpoints/QM_rag/gguf}"
 QUANTIZE="${QUANTIZE:-q4_k_m}"
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --adapter, -a PATH      Path to LoRA adapter (default: checkpoints/QM_rag/checkpoint-1000)"
-            echo "  --base-model, -b MODEL  Base model name (default: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B)"
+            echo "  --base-model, -b MODEL  Base model name (default: mistralai/Mistral-7B-Instruct-v0.3)"
             echo "  --merged-output, -m DIR Merged model output (default: checkpoints/QM_rag/merged)"
             echo "  --gguf-output, -g DIR   GGUF output directory (default: checkpoints/QM_rag/gguf)"
             echo "  --quantize, -q TYPE     Quantization type (default: q4_k_m)"

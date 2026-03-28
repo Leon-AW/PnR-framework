@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Default Prompts (DeepSeek-R1 style: NO system prompt, instructions in user)
+# Default Prompts (no system prompt; all instructions in user message)
 # =============================================================================
 
-# DeepSeek-R1 recommendation: Avoid system prompts, include all instructions in user message
+# Include all instructions in the user message rather than a system prompt
 DEFAULT_SIMPLE_USER_PREFIX = (
     "Answer the following question accurately and concisely based on your knowledge.\n\n"
 )
@@ -64,12 +64,12 @@ class LocalJSONConfig:
     include_negatives: bool = True
     validation_split: float = 0.1
     language_filter: Optional[str] = None
-    user_prefix: Optional[str] = None  # Renamed from system_prompt (DeepSeek-R1 style)
+    user_prefix: Optional[str] = None  # Renamed from system_prompt 
     docs_base_path: Optional[str] = None
     noise_chunks: tuple[int, int] = (1, 2)
     chunk_config: Optional[Any] = None  # ChunkConfig if using RAG
     seed: int = 42
-    use_chain_of_thought: bool = True  # Use analysis field as <think> block
+    use_chain_of_thought: bool = False  # Use analysis field as <think> block
 
 
 # =============================================================================
@@ -149,7 +149,7 @@ class LocalJSONLoader:
     def _format_simple(self, item: dict) -> dict:
         """Format item for simple (monolithic) training.
         
-        DeepSeek-R1 style: No system prompt, instructions in user message.
+        No system prompt; all instructions in user message.
         Chain-of-Thought: analysis field wrapped in <think>...</think> tags.
         """
         user_prefix = self.config.user_prefix or DEFAULT_SIMPLE_USER_PREFIX
@@ -163,12 +163,12 @@ class LocalJSONLoader:
         
         # Build assistant response with optional Chain-of-Thought
         if self.config.use_chain_of_thought and analysis:
-            # DeepSeek-R1 format: <think>reasoning</think>\n\nfinal_answer
+            # Format: <think>reasoning</think>\n\nfinal_answer
             assistant_content = f"<think>\n{analysis}\n</think>\n\n{answer}"
         else:
             assistant_content = answer
         
-        # DeepSeek-R1: No system prompt
+        # No system prompt
         messages = [
             {"role": "user", "content": user_content},
             {"role": "assistant", "content": assistant_content},
@@ -186,7 +186,7 @@ class LocalJSONLoader:
     def _format_rag(self, item: dict) -> dict:
         """Format item for RAG training with document context.
         
-        DeepSeek-R1 style: No system prompt, instructions in user message.
+        No system prompt; all instructions in user message.
         Chain-of-Thought: analysis field wrapped in <think>...</think> tags.
         """
         user_prefix = self.config.user_prefix or DEFAULT_RAG_USER_PREFIX
@@ -202,17 +202,17 @@ class LocalJSONLoader:
         if evidence:
             context = f"[Documents:]\n--- Document 1 ---\n{evidence}\n\n"
         
-        # DeepSeek-R1 style: All instructions in user prompt
+        # All instructions in user prompt
         user_content = f"{user_prefix}{context}[Question:]\n{question}"
         
         # Build assistant response with optional Chain-of-Thought
         if self.config.use_chain_of_thought and analysis:
-            # DeepSeek-R1 format: <think>reasoning</think>\n\nfinal_answer
+            # Format: <think>reasoning</think>\n\nfinal_answer
             assistant_content = f"<think>\n{analysis}\n</think>\n\n{answer}"
         else:
             assistant_content = answer
         
-        # DeepSeek-R1: No system prompt
+        # No system prompt
         messages = [
             {"role": "user", "content": user_content},
             {"role": "assistant", "content": assistant_content},

@@ -78,7 +78,7 @@ class EvalConfig:
         use_llm_judge: Whether to run LLM-as-a-judge scoring.
         use_gpu: Whether to use GPU for inference.
     """
-    model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3"
     checkpoints_dir: str = "checkpoints"
     embedding_model: str | None = None
     router_state_path: str | None = None

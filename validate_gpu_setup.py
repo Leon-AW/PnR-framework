@@ -13,7 +13,7 @@ Usage:
 This script validates:
 1. CUDA availability and device count
 2. MIG mode detection
-3. Memory requirements for DeepSeek-R1-14B training
+3. Memory requirements for Mistral-7B training
 4. Distributed training compatibility
 """
 
@@ -91,17 +91,17 @@ def check_gpu_devices(target_devices=None):
 
 
 def estimate_memory_requirements():
-    """Estimate memory requirements for DeepSeek-R1-14B training."""
+    """Estimate memory requirements for Mistral-7B-Instruct training."""
     print("\n" + "="*60)
     print("MEMORY REQUIREMENTS ESTIMATE")
     print("="*60)
-    print("Model: DeepSeek-R1-Distill-Qwen-14B (14B parameters)")
+    print("Model: Mistral-7B-Instruct-v0.3 (7B parameters)")
     print()
     print("4-bit Quantization (INT4):")
-    print("  - Model weights:        ~8 GB")
-    print("  - LoRA adapters:        ~0.5 GB")
-    print("  - Optimizer states:     ~1-2 GB (paged_adamw_8bit)")
-    print("  - Activations (bs=1):   ~2-4 GB (gradient checkpointing)")
+    print("  - Model weights:        ~4 GB")
+    print("  - LoRA adapters:        ~0.3 GB")
+    print("  - Optimizer states:     ~1 GB (paged_adamw_8bit)")
+    print("  - Activations (bs=1):   ~1-2 GB (gradient checkpointing)")
     print("  - KV cache:             ~1-2 GB (max_seq=1024)")
     print("  - PyTorch overhead:     ~1-2 GB")
     print("  " + "-"*40)

@@ -926,7 +926,7 @@ llm = PatchAndRouteLLM()
 
 # Or specify custom configuration
 config = FrozenFoundationConfig(
-    model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+    model_id="mistralai/Mistral-7B-Instruct-v0.3",
     quantization=QuantizationType.INT4,
 )
 llm = PatchAndRouteLLM(foundation_config=config)
@@ -1049,7 +1049,7 @@ trainer.save_model()
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model_id` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-14B` | Base model |
+| `--model_id` | `mistralai/Mistral-7B-Instruct-v0.3` | Base model |
 | `--quantization` | `int4` | Quantization type (`none`, `int8`, `int4`) |
 | `--lora_r` | 16 | LoRA rank |
 | `--lora_alpha` | 32 | LoRA alpha scaling factor |
@@ -1134,87 +1134,7 @@ Three-dataset evaluation plan:
 
 ## Roadmap
 
-Based on the Master's Thesis timeline (6 months).
-
-### Phase 1: Foundation & Infrastructure (Month 1)
-- [x] Frozen Foundation with 4-bit/8-bit quantization
-- [x] Base Expert Adapter training (LoRA)
-- [x] Streaming data with temporal filtering
-- [x] Multi-expert inference (Expert Pool)
-- [x] Knowledge Router implementation (Time-Aware Centroid Router)
-- [x] Conflict resolution (Source-Replay mechanism)
-- [x] Evaluation pipeline (`eval_pnr.py` — EM, F1, ESR, CFR, routing accuracy, LLM judge)
-- [x] SituatedQA and CounterFact data loaders
-- [x] Chat template formatting for instruction tuning
-- [x] Configuration serialization (JSON)
-- [x] Centralized logging system
-- [x] MLflow experiment tracking (run comparison, loss curves, GPU memory)
-- [x] Data preparation pipeline (PDF → Markdown → QA pairs)
-- [x] QM corpus preprocessing (AIT proprietary data)
-
-### Phase 2: Core Framework & Base Adapters (Month 2)
-- [x] Train domain Base Adapters:
-  - [x] `base_v1` (pre-2019 stable facts + US geo — `checkpoints/base_v1/`)
-- [ ] Expert Pool management system (formal governance / domain selection API)
-- [ ] Two-Level Routing structure:
-  - [ ] Level 1: Manual Domain Selection (UI "Hard Switch")
-  - [ ] Level 2: Intelligent Dispatcher interface (Micro-Router)
-- [ ] Train remaining Base Adapters:
-  - [ ] `QM_Base_Adapter_v1` (AIT corpus)
-
-### Phase 3: Router Architectures (Month 3)
-- [x] **Time-Aware Centroid Router with Source-Replay** (embedding-based):
-  - [x] Adapter centroid computation from training data
-  - [x] Cosine similarity routing
-  - [x] Scoped Retrieval for conflict resolution (RAG-augmented via FAISS)
-- [x] **Parallel-Orchestrator Architecture** (ensemble & synthesis):
-  - [x] Intelligent Router (Query Planner)
-  - [x] Parallel Execution Engine (sequential hot-swap)
-  - [x] Context Synthesis Agent (The Resolver)
-  - [x] Eval integration (`--parallel` flags in `eval_pnr.py`)
-- [ ] Probe-and-Judge conflict detection mechanism
-- [x] X-LoRA baseline integration
-- [x] **MORPHEUS Architecture** (multi-system cognitive CL):
-  - [x] System 1 — Stable Core with CKA-bounded versioning
-  - [x] System 2 — Expert Bank with lifecycle management
-  - [x] System 2r — Prototype Router (non-parametric, JL projection, hub mitigation)
-  - [x] System 3 — Fast Adaptation Buffer
-  - [x] System 4 — Consolidation Engine (interleaved rehearsal, structural distillation)
-  - [x] System 4a — Self-Generated Rehearsal with model-collapse safeguards
-  - [x] System 5 — Knowledge Store with graduated factuality override
-  - [x] System 6 — Meta-Controller (heuristic policy, anomaly detection, staged rollback)
-  - [x] MORPHEUS inference pipeline (eval-compatible)
-
-### Phase 4: Knowledge Patches & Baselines (Month 4)
-- [x] Train Knowledge Patches:
-  - [x] Temporal patch (`patch_temp_2019_plus` — post-2019 updates)
-  - [x] Geographic patches (11 adapters: AU, CA, UK, US-CA, DE, FR, IN, NG, PK, England, Others)
-- [x] Implement baseline models:
-  - [x] Monolithic LoRA fine-tuning (`train_monolithic_baseline.py`)
-  - [x] LoRA + RAG hybrid (`train_rag_baseline.py`)
-- [ ] Train remaining Knowledge Patches:
-  - [ ] QM updates (CEO changes, role modifications)
-  - [ ] Counterfactual patches for controlled editing experiments
-- [ ] Implement remaining baselines:
-  - [ ] L2R (Learning to Route)
-  - [X] X-LoRA (soft-gating)
-
-### Phase 5: Evaluation (Month 5)
-- [x] **MORPHEUS evaluation integration**:
-  - [x] `--morpheus` / `--morpheus_state_dir` flags in `eval_pnr.py`
-  - [x] Unit test suite (165 tests across 7 test files)
-  - [x] Continual learning evaluation script (`eval_morpheus_continual.py`)
-- [ ] **O2 - Efficiency**: Wall-clock time, GPU VRAM, FLOPs comparison
-- [ ] **O3a - Conflict Resolution**: ESR, flip/reversibility rates (CounterFact-Tracing)
-- [ ] **O3b - Cooperative Composition**: Multi-hop accuracy, synthesis quality
-- [ ] **O4 - Stability**: CFR targeting 0% on D_Control
-- [ ] Ablation studies comparing router variants
-
-### Phase 6: Analysis & Finalization (Month 6)
-- [ ] Quantitative and qualitative analysis
-- [ ] Hypothesis validation (H1-H3)
-- [ ] Public GitHub release with documentation
-- [ ] Master's Thesis submission
+See [`docs/roadmap.md`](docs/roadmap.md) for the full project roadmap, current training status, and dataset × baseline readiness overview.
 
 ## Development
 

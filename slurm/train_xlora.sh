@@ -65,7 +65,7 @@ python train_xlora_baseline.py \
     --model_id mistralai/Mistral-7B-Instruct-v0.3 \
     --checkpoints_dir checkpoints/ \
     --output_dir checkpoints/xlora_baseline \
-    --max_steps 10000 \
+    --max_steps 3000 \
     --batch_size 1 \
     --gradient_accumulation 4 \
     --max_seq_length 4096 \

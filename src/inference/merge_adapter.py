@@ -40,7 +40,7 @@ class MergeConfig:
         push_to_hub: Push merged model to HuggingFace Hub
         hub_model_id: Model ID for Hub upload
     """
-    base_model: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+    base_model: str = "mistralai/Mistral-7B-Instruct-v0.3"
     adapter_path: str = "checkpoints/QM_rag/checkpoint-1000"
     output_path: str = "checkpoints/QM_rag/merged"
     torch_dtype: str = "float16"
@@ -207,7 +207,7 @@ def main():
         if base_model:
             logger.info(f"Auto-detected base model: {base_model}")
         else:
-            base_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+            base_model = "mistralai/Mistral-7B-Instruct-v0.3"
             logger.warning(f"Could not detect base model, using default: {base_model}")
 
     config = MergeConfig(

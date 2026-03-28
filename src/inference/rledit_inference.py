@@ -190,7 +190,7 @@ class RLEditInference:
 
         wrapper = RLEditInference(
             checkpoint_dir="checkpoints/rledit_baseline",
-            model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+            model_id="mistralai/Mistral-7B-Instruct-v0.3",
         )
         # Apply edits from evaluation set
         wrapper.apply_edits([
@@ -203,7 +203,7 @@ class RLEditInference:
     def __init__(
         self,
         checkpoint_dir: str | Path,
-        model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        model_id: str = "mistralai/Mistral-7B-Instruct-v0.3",
         quantization: str = "int4",
         max_new_tokens: int = 256,
         temperature: float = 0.1,

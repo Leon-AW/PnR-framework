@@ -28,7 +28,7 @@ Options:
     --xlora_depth       X-LoRA gating network depth (default: 8)
     --cutoff_year       Temporal cutoff matching base adapter (default: 2019)
     --buffer_size       Shuffle buffer size for streaming (default: 10000)
-    --model_id          Base model (default: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B)
+    --model_id          Base model (default: mistralai/Mistral-7B-Instruct-v0.3)
     --quantization      none, int8, int4 (default: int4)
     --max_steps         Training steps (default: 2000)
     --batch_size        Per-device batch size (default: 1)

@@ -319,39 +319,24 @@ class PatchAndRouteTrainer:
                 "Set tokenizer.pad_token = tokenizer.eos_token"
             )
         
-        # Override chat template for training.
-        # IMPORTANT: The stock DeepSeek-R1 tokenizer template strips <think>
-        # blocks from assistant messages (designed for multi-turn inference).
-        # During training we MUST preserve <think> blocks so the model learns
-        # the Chain-of-Thought pattern. Always use this training-safe template.
-        _TRAINING_CHAT_TEMPLATE = (
-            "{{ bos_token }}"
-            "{% if messages[0]['role'] == 'system' %}"
-            "{{ messages[0]['content'] }}"
-            "{% set loop_messages = messages[1:] %}"
-            "{% else %}"
-            "{% set loop_messages = messages %}"
-            "{% endif %}"
-            "{% for message in loop_messages %}"
-            "{% if message['role'] == 'user' %}"
-            "<｜User｜>{{ message['content'] }}"
-            "{% elif message['role'] == 'assistant' %}"
-            "<｜Assistant｜>{{ message['content'] }}<｜end▁of▁sentence｜>"
-            "{% endif %}"
-            "{% endfor %}"
-            "{% if add_generation_prompt %}<｜Assistant｜>{% endif %}"
-        )
+        # Chat template: use the tokenizer's built-in template unchanged.
+        # Most instruction-tuned models (Mistral, LLaMA, Qwen, etc.) ship a
+        # correct template.  Only fall back if none is present.
         if self.tokenizer.chat_template is None:
             logger.warning(
                 "Tokenizer has no chat_template. "
-                "Setting training-safe DeepSeek-R1 template."
+                "Falling back to a generic instruction template."
+            )
+            self.tokenizer.chat_template = (
+                "{% for message in messages %}"
+                "{% if message['role'] == 'user' %}[INST] {{ message['content'] }} [/INST]"
+                "{% elif message['role'] == 'assistant' %}{{ message['content'] }}{{ eos_token }}"
+                "{% endif %}"
+                "{% endfor %}"
+                "{% if add_generation_prompt %}{% endif %}"
             )
         else:
-            logger.info(
-                "Overriding tokenizer chat_template with training-safe "
-                "template (preserves <think> blocks)."
-            )
-        self.tokenizer.chat_template = _TRAINING_CHAT_TEMPLATE
+            logger.info("Using tokenizer's built-in chat_template.")
         
         logger.info("✓ Tokenizer validated")
     

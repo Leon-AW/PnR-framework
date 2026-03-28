@@ -215,7 +215,7 @@ def run_sequential_protocol(
     routing_only: bool = False,
     output_dir: str = "eval_results/morpheus_continual",
     checkpoints_dir: str = "checkpoints",
-    model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3",
     **kwargs,
 ) -> ContinualEvalReport:
     """Run the sequential domain learning protocol.
@@ -620,7 +620,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_id",
         type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        default="mistralai/Mistral-7B-Instruct-v0.3",
         help="Base model identifier",
     )
     parser.add_argument(

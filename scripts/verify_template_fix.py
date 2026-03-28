@@ -35,7 +35,7 @@ TRAINING_SAFE_TEMPLATE = (
 
 
 def main():
-    model_id = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+    model_id = "mistralai/Mistral-7B-Instruct-v0.3"
     data_path = "src/data/dataset_final.json"
 
     print("Loading tokenizer...")

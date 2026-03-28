@@ -56,7 +56,7 @@ class StableCoreConfig:
     The core stores deep structural knowledge and changes only through
     carefully constrained structural distillation.
     """
-    model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3"
     quantization: str = "int4"
     device_map: str = "auto"
     torch_dtype: torch.dtype = torch.bfloat16

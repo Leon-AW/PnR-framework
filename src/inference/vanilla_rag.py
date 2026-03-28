@@ -43,7 +43,7 @@ class VanillaRAGConfig:
         load_in_4bit: Use 4-bit quantization for model
         load_in_8bit: Use 8-bit quantization for model
     """
-    model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+    model_name: str = "mistralai/Mistral-7B-Instruct-v0.3"
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     vector_store_type: Literal["faiss", "chroma"] = "faiss"
     vector_store_path: Optional[str] = None
@@ -599,7 +599,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="VanillaRAG - QM Document RAG")
-    parser.add_argument("--model", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+    parser.add_argument("--model", default="mistralai/Mistral-7B-Instruct-v0.3",
                         help="Model name or path")
     parser.add_argument("--embedding-model",
                         default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",

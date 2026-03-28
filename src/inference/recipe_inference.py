@@ -78,7 +78,7 @@ class RECIPEConfig:
     cpt_length: int = 3
     temperature: float = 1.0
     lambda_loc: float = 0.5
-    llm_hidden_size: int = 5120  # Qwen2.5-14B / DeepSeek-R1-Distill-Qwen-14B
+    llm_hidden_size: int = 4096  # Mistral-7B / LLaMA-2-7B / LLaMA-3-8B
 
     def to_dict(self) -> dict:
         return {
@@ -310,7 +310,7 @@ class RECIPEInference:
 
         wrapper = RECIPEInference(
             checkpoint_dir="checkpoints/recipe_baseline",
-            model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+            model_id="mistralai/Mistral-7B-Instruct-v0.3",
         )
         wrapper.apply_edit("Who is the CEO of Amazon?", "Andy Jassy")
         result = wrapper.generate("Who leads Amazon?")
@@ -320,7 +320,7 @@ class RECIPEInference:
     def __init__(
         self,
         checkpoint_dir: str | Path,
-        model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        model_id: str = "mistralai/Mistral-7B-Instruct-v0.3",
         quantization: str = "int4",
         max_new_tokens: int = 256,
         temperature: float = 0.1,

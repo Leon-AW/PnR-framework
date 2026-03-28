@@ -36,7 +36,7 @@ TRAINING_CHAT_TEMPLATE = (
 
 def main():
     data_path = "src/data/dataset_final.json"
-    model_id = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+    model_id = "mistralai/Mistral-7B-Instruct-v0.3"
 
     print(f"Loading tokenizer: {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)

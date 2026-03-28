@@ -58,7 +58,7 @@ def normalize_answer(text: str) -> str:
 
 
 def parse_model_output(raw_text: str) -> str:
-    """Extract the final answer from a DeepSeek-R1-style model output.
+    """Extract the final answer from model output, stripping chain-of-thought.
 
     Splits on ``</think>`` and returns everything after it.
     Falls back to the full text if no ``</think>`` tag is present.

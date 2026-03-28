@@ -112,7 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_id",
         type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        default="mistralai/Mistral-7B-Instruct-v0.3",
         help="HuggingFace model ID for the base LLM",
     )
     parser.add_argument(
