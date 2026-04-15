@@ -134,34 +134,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    # LoRA + RAG baseline (Baseline 2 from exposé)
+    parser.add_argument(
+        "--lora_rag",
+        type=str,
+        default=None,
+        help=(
+            "Path to monolithic LoRA adapter for the LoRA+RAG hybrid baseline. "
+            "Combines fine-tuned adapter inference with QA-pair retrieval at "
+            "inference time (requires --lora_rag_index)."
+        ),
+    )
+    parser.add_argument(
+        "--lora_rag_index",
+        type=str,
+        default=None,
+        help=(
+            "Path to JSON file of {question, answer} pairs to index for retrieval "
+            "in the LoRA+RAG baseline.  Typically data/edit_pairs.json."
+        ),
+    )
+
     # X-LoRA baseline
     parser.add_argument(
         "--xlora",
         type=str,
         default=None,
         help="Path to X-LoRA gating checkpoint (replaces PnR routing with soft adapter blending)",
-    )
-
-    # RLEdit baseline
-    parser.add_argument(
-        "--rledit",
-        type=str,
-        default=None,
-        help=(
-            "Path to RLEdit hypernetwork checkpoint directory produced by "
-            "train_rledit_baseline.py (contains rledit_hypernetwork.pt + rledit_config.json). "
-            "Applies direct weight edits via a trained RL hypernetwork."
-        ),
-    )
-    parser.add_argument(
-        "--rledit_edits",
-        type=str,
-        default=None,
-        help=(
-            "Path to JSON file with edit pairs to apply before evaluation. "
-            "Each entry: {\"question\": str, \"answer\": str} or [question, answer]. "
-            "If omitted, evaluates the unedited base model through the hypernetwork."
-        ),
     )
 
     # Parallel Orchestrator
@@ -190,26 +189,24 @@ def parse_args() -> argparse.Namespace:
         help="Maximum tokens for the synthesis pass",
     )
 
-    # RECIPE baseline
+    # RECIPE baseline (official EMNLP-2024 implementation)
     parser.add_argument(
-        "--recipe",
+        "--recipe_official",
         type=str,
         default=None,
         help=(
-            "Path to RECIPE module checkpoint directory produced by "
-            "train_recipe_baseline.py (contains recipe_module.pt + recipe_config.json). "
-            "Applies lifelong knowledge editing via retrieval-augmented continuous prompts."
+            "Path to a checkpoint FILE produced by external/RECIPE/train_recipe.py "
+            "(the official EMNLP-2024 implementation). Loads the base LLM and the "
+            "trained knowl_rep_model + prompt_transformer from the official repo."
         ),
     )
     parser.add_argument(
-        "--recipe_edits",
+        "--recipe_official_edits",
         type=str,
         default=None,
         help=(
-            "Path to JSON file with knowledge edits to load into the RECIPE repository "
-            "before evaluation.  Each entry: {\"question\": str, \"answer\": str}. "
-            "If omitted, evaluates the base model through the trained RECIPE module "
-            "with an empty repository (no edits applied)."
+            "JSON file of edits to populate the official-RECIPE knowledge base "
+            "before evaluation. Each entry: {\"question\": str, \"answer\": str}."
         ),
     )
 
@@ -314,6 +311,8 @@ def main() -> None:
         local_data_paths=args.local_data_paths,
         monolithic_adapter=args.monolithic,
         no_adapter=args.no_adapter,
+        lora_rag_adapter=args.lora_rag,
+        lora_rag_index_path=args.lora_rag_index,
         xlora_checkpoint=args.xlora,
         parallel_orchestrator=args.parallel,
         parallel_max_adapters=args.parallel_max_adapters,
@@ -321,10 +320,8 @@ def main() -> None:
         parallel_synthesis_tokens=args.parallel_synth_tokens,
         morpheus=args.morpheus,
         morpheus_state_dir=args.morpheus_state_dir,
-        rledit_checkpoint=args.rledit,
-        rledit_edits_path=args.rledit_edits,
-        recipe_checkpoint=args.recipe,
-        recipe_edits_path=args.recipe_edits,
+        recipe_official_checkpoint=args.recipe_official,
+        recipe_official_edits_path=args.recipe_official_edits,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         do_sample=False,
@@ -350,14 +347,13 @@ def main() -> None:
         logger.info(f"  Mode: MORPHEUS multi-system architecture")
         if config.morpheus_state_dir:
             logger.info(f"         State dir: {config.morpheus_state_dir}")
-    elif config.recipe_checkpoint:
-        logger.info(f"  Mode: RECIPE — {config.recipe_checkpoint}")
-        if config.recipe_edits_path:
-            logger.info(f"         Edits: {config.recipe_edits_path}")
-    elif config.rledit_checkpoint:
-        logger.info(f"  Mode: RLEdit — {config.rledit_checkpoint}")
-        if config.rledit_edits_path:
-            logger.info(f"         Edits: {config.rledit_edits_path}")
+    elif config.recipe_official_checkpoint:
+        logger.info(f"  Mode: RECIPE (official repo) — {config.recipe_official_checkpoint}")
+        if config.recipe_official_edits_path:
+            logger.info(f"         Edits: {config.recipe_official_edits_path}")
+    elif config.lora_rag_adapter:
+        logger.info(f"  Mode: LoRA+RAG — adapter={config.lora_rag_adapter}")
+        logger.info(f"         Index:   {config.lora_rag_index_path}")
     elif config.xlora_checkpoint:
         logger.info(f"  Mode: X-LoRA — {config.xlora_checkpoint}")
     elif config.monolithic_adapter:

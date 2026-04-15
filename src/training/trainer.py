@@ -413,7 +413,11 @@ class PatchAndRouteTrainer:
         eval_data = None
         if self.eval_dataset is not None:
             eval_data = self._prepare_dataset(self.eval_dataset, shuffle=False)
-        
+        else:
+            # Streaming datasets (e.g. SituatedQA) have no eval split — disable eval
+            self.config.eval_strategy = "no"
+            self.config.load_best_model_at_end = False
+
         # Get formatting function
         formatting_func = self._formatting_func or self._default_formatting_func
 

@@ -3,34 +3,32 @@
 Train Monolithic Baseline
 =========================
 
-Main entry point for training a single LoRA adapter on combined local JSON datasets.
+Trains a single LoRA adapter on all available knowledge — the direct
+apples-to-apples comparison against the PnR multi-adapter approach.
 
-This script implements the monolithic baseline approach:
-1. Load multiple JSON QA files and combine them
-2. Apply simple chat format (question -> answer)
-3. Train a single LoRA adapter
-4. Save checkpoint
+Two data modes:
+
+  --situatedqa       (default for thesis evaluation)
+      Combines all SituatedQA streams that PnR trains separate adapters on:
+        • base stream       (pre-cutoff stable facts + US geo)
+        • temporal stream   (post-cutoff temporal updates)
+        • all-non-US stream (11 geographic regions)
+      This is a fair comparison: same data, one adapter vs. many.
+
+  --data_paths f1.json f2.json ...
+      Local JSON files (QM-AIT or custom datasets).
 
 Usage:
-    python train_monolithic_baseline.py --data_paths data/archive.json data/current.json
-
-    Options:
-        --data_paths        Paths to JSON files (can specify multiple)
-        --output_dir        Checkpoint directory
-        --model_id          Base model (default: mistralai/Mistral-7B-Instruct-v0.3)
-        --quantization      none, int8, int4 (default: int4)
-        --lora_r            LoRA rank (default: 16)
-        --lora_alpha        LoRA alpha (default: 32)
-        --max_steps         Training steps (default: 2000)
-        --batch_size        Per-device batch size (default: 4)
-        --learning_rate     Peak LR (default: 2e-4)
-        --system_prompt     Custom system prompt (optional)
-
-Example:
-    python train_monolithic_baseline.py \\
-        --data_paths data/archive.json data/current.json \\
+    # SituatedQA mode (thesis eval):
+    CUDA_VISIBLE_DEVICES=0 python train/train_monolithic_baseline.py \\
+        --situatedqa \\
         --output_dir checkpoints/monolithic_v1 \\
         --max_steps 2000
+
+    # Local JSON mode:
+    CUDA_VISIBLE_DEVICES=0 python train/train_monolithic_baseline.py \\
+        --data_paths data/archive.json data/current.json \\
+        --output_dir checkpoints/monolithic_v1
 """
 
 from __future__ import annotations
@@ -39,10 +37,9 @@ import argparse
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+# Project root is one level up from train/
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.data.local_loader import LocalJSONLoader, LocalJSONConfig
 from src.models.core import (
     PatchAndRouteLLM,
     FrozenFoundationConfig,
@@ -54,21 +51,49 @@ from src.utils.logging import setup_logger, configure_framework_logging
 from src.utils.config import save_config
 
 
+# Geographic regions that PnR trains separate adapters for
+SITUATEDQA_GEO_REGIONS = [
+    "australia", "california", "canada", "england", "france",
+    "germany", "india", "nigeria", "others", "pakistan", "uk",
+]
+
+
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Train monolithic LoRA adapter on combined JSON datasets",
+        description="Train monolithic LoRA baseline (single adapter on all data)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Data configuration
-    parser.add_argument(
+    # ---- Data mode (mutually exclusive) -------------------------------------
+    data_group = parser.add_mutually_exclusive_group(required=True)
+    data_group.add_argument(
+        "--situatedqa",
+        action="store_true",
+        help="Train on all SituatedQA streams combined (base + temporal + geo)",
+    )
+    data_group.add_argument(
         "--data_paths",
         type=str,
         nargs="+",
-        required=True,
-        help="Paths to JSON files (can specify multiple)",
+        metavar="FILE",
+        help="Local JSON files for QM-AIT or custom datasets",
     )
+
+    # ---- SituatedQA options -------------------------------------------------
+    parser.add_argument(
+        "--cutoff_year",
+        type=int,
+        default=2019,
+        help="Year boundary for temporal split (base = before, patch = after)",
+    )
+    parser.add_argument(
+        "--buffer_size",
+        type=int,
+        default=1000,
+        help="Shuffle buffer size for streaming datasets",
+    )
+
+    # ---- Local JSON options --------------------------------------------------
     parser.add_argument(
         "--include_negatives",
         action="store_true",
@@ -84,22 +109,16 @@ def parse_args() -> argparse.Namespace:
         "--language_filter",
         type=str,
         default=None,
-        help="Filter by language code (e.g., 'en', 'de')",
-    )
-    parser.add_argument(
-        "--system_prompt",
-        type=str,
-        default=None,
-        help="Custom system prompt (uses default if not specified)",
+        help="Filter by language code (e.g. 'en')",
     )
     parser.add_argument(
         "--validation_split",
         type=float,
         default=0.1,
-        help="Fraction of data for validation",
+        help="Fraction held out for validation (local JSON mode only)",
     )
 
-    # Model configuration
+    # ---- Model --------------------------------------------------------------
     parser.add_argument(
         "--model_id",
         type=str,
@@ -111,103 +130,42 @@ def parse_args() -> argparse.Namespace:
         type=str,
         choices=["none", "int8", "int4"],
         default="int4",
-        help="Quantization type for memory efficiency",
+        help="Quantization type",
     )
 
-    # LoRA configuration
-    parser.add_argument(
-        "--lora_r",
-        type=int,
-        default=16,
-        help="LoRA rank (higher = more capacity)",
-    )
-    parser.add_argument(
-        "--lora_alpha",
-        type=int,
-        default=32,
-        help="LoRA alpha scaling factor",
-    )
+    # ---- LoRA ---------------------------------------------------------------
+    parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
 
-    # Training configuration
+    # ---- Training -----------------------------------------------------------
+    parser.add_argument("--max_steps", type=int, default=2000, help="Max training steps")
+    parser.add_argument("--batch_size", type=int, default=1, help="Per-device batch size")
     parser.add_argument(
-        "--max_steps",
-        type=int,
-        default=2000,
-        help="Maximum training steps",
+        "--gradient_accumulation", type=int, default=16, help="Gradient accumulation steps"
     )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=1,  # Reduced for 14B model on 24GB GPU
-        help="Per-device batch size",
-    )
-    parser.add_argument(
-        "--gradient_accumulation",
-        type=int,
-        default=16,  # Increased to maintain effective batch size
-        help="Gradient accumulation steps",
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=2e-4,
-        help="Peak learning rate",
-    )
-    parser.add_argument(
-        "--max_seq_length",
-        type=int,
-        default=4096,  # Increased for Chain-of-Thought (analysis field can be long)
-        help="Maximum sequence length (use 4096+ for CoT to avoid truncation)",
-    )
+    parser.add_argument("--learning_rate", type=float, default=2e-4, help="Peak learning rate")
+    parser.add_argument("--max_seq_length", type=int, default=2048, help="Max sequence length")
+    parser.add_argument("--save_steps", type=int, default=200, help="Steps between saves")
+    parser.add_argument("--logging_steps", type=int, default=25, help="Steps between logs")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
-    # Output configuration
+    # ---- Output -------------------------------------------------------------
     parser.add_argument(
         "--output_dir",
         type=str,
         default="checkpoints/monolithic_v1",
-        help="Output directory for checkpoints",
-    )
-    parser.add_argument(
-        "--save_steps",
-        type=int,
-        default=200,
-        help="Steps between checkpoint saves",
-    )
-    parser.add_argument(
-        "--logging_steps",
-        type=int,
-        default=10,
-        help="Steps between logging",
+        help="Checkpoint output directory",
     )
 
-    # Misc
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility",
-    )
+    # ---- Misc ---------------------------------------------------------------
     parser.add_argument(
         "--log_level",
         type=str,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
-        help="Logging verbosity",
     )
-    
-    # Chain-of-Thought
     parser.add_argument(
-        "--no_chain_of_thought",
-        action="store_true",
-        help="Disable Chain-of-Thought training (omit <think> blocks from analysis field)",
-    )
-
-    # MLflow experiment tracking
-    parser.add_argument(
-        "--experiment_name",
-        type=str,
-        default="pnr-training",
-        help="MLflow experiment name",
+        "--experiment_name", type=str, default="pnr-training", help="MLflow experiment name"
     )
     parser.add_argument(
         "--run_name",
@@ -219,159 +177,137 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validate_gpu_configuration() -> None:
-    """Validate GPU configuration before training.
-
-    Catches common issues that cause training failures:
-    - Distributed training with insufficient GPUs
-    - Memory constraints
-    """
+def validate_gpu() -> None:
     import torch
     import os
 
-    # Check if running in distributed mode (launched by torchrun/accelerate)
     world_size = os.environ.get("WORLD_SIZE")
-    local_rank = os.environ.get("LOCAL_RANK")
-
     if world_size is not None:
         world_size = int(world_size)
         device_count = torch.cuda.device_count()
-
         if world_size > device_count:
             raise RuntimeError(
-                f"Distributed training misconfiguration detected!\n"
-                f"  WORLD_SIZE={world_size} but only {device_count} CUDA devices visible.\n"
-                f"  This will cause 'CUDA error: invalid device ordinal'.\n\n"
-                f"Solutions:\n"
-                f"  1. For single-GPU training: unset WORLD_SIZE LOCAL_RANK RANK\n"
-                f"  2. For multi-GPU: ensure --gres=gpu:N matches num_processes in accelerate"
+                f"WORLD_SIZE={world_size} but only {device_count} CUDA devices visible. "
+                "Use CUDA_VISIBLE_DEVICES to pin to a single GPU."
             )
 
-        print(f"[INFO] Distributed training: WORLD_SIZE={world_size}, LOCAL_RANK={local_rank}")
-
-    # Check device availability
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. Check your GPU drivers and CUDA installation.")
+        raise RuntimeError("CUDA not available.")
 
-    device_count = torch.cuda.device_count()
-    if device_count == 0:
-        raise RuntimeError("No CUDA devices found. Check CUDA_VISIBLE_DEVICES setting.")
-
-    # Check memory on first device
     props = torch.cuda.get_device_properties(0)
-    memory_gb = props.total_memory / 1024**3
-
-    if memory_gb < 20:
-        print(f"[WARNING] Device 0 has only {memory_gb:.1f} GB VRAM.")
-        print("          Mistral-7B-Instruct with 4-bit quantization needs ~6-8 GB.")
-        print("          Training may fail with OOM errors.")
-    else:
-        print(f"[OK] Device 0: {props.name} with {memory_gb:.1f} GB VRAM")
+    mem_gb = props.total_memory / 1024**3
+    print(f"[OK] GPU 0: {props.name} — {mem_gb:.1f} GB VRAM")
 
 
-def main() -> None:
-    """Main training pipeline."""
-    args = parse_args()
+def load_situatedqa_combined(args, logger):
+    """Load and interleave all SituatedQA streams that PnR trains on."""
+    from datasets import interleave_datasets
+    from src.data.loader import SituatedQALoader, SituatedQAConfig
 
-    # Validate GPU configuration early to catch issues before loading model
-    validate_gpu_configuration()
+    cfg = SituatedQAConfig(
+        streaming=True,
+        temporal_cutoff_year=args.cutoff_year,
+        buffer_size=args.buffer_size,
+        seed=args.seed,
+    )
+    loader = SituatedQALoader(config=cfg)
 
-    # Handle negatives flag
+    logger.info("Loading SituatedQA streams (combined monolithic mode):")
+    base_stream = loader.get_base_stream()
+    logger.info("  ✓ base stream (pre-%d stable facts + US geo)", args.cutoff_year)
+
+    temporal_stream = loader.get_temporal_patch_stream()
+    logger.info("  ✓ temporal stream (post-%d updates)", args.cutoff_year)
+
+    geo_stream = loader.get_all_non_us_stream()
+    logger.info("  ✓ all-non-US geo stream (%d regions)", len(SITUATEDQA_GEO_REGIONS))
+
+    combined = interleave_datasets([base_stream, temporal_stream, geo_stream])
+    train_dataset = loader.format_stream(combined, shuffle=True)
+    logger.info("✓ Combined stream ready (interleaved, shuffled)")
+    return train_dataset, loader
+
+
+def load_local_json(args, logger):
+    """Load local JSON files."""
+    from src.data.local_loader import LocalJSONLoader, LocalJSONConfig
+
     include_negatives = args.include_negatives and not args.no_negatives
-
-    # =========================================================================
-    # Setup Logging
-    # =========================================================================
-    configure_framework_logging(level=args.log_level)
-    logger = setup_logger("train_monolithic", level=args.log_level)
-
-    logger.info("=" * 70)
-    logger.info("MONOLITHIC BASELINE: COMBINED DATASET TRAINING")
-    logger.info("=" * 70)
-    logger.info(f"Model: {args.model_id}")
-    logger.info(f"Quantization: {args.quantization}")
-    logger.info(f"LoRA rank: {args.lora_r}")
-    logger.info(f"Max steps: {args.max_steps}")
-    logger.info(f"Data files: {len(args.data_paths)}")
-    for p in args.data_paths:
-        logger.info(f"  - {p}")
-    logger.info(f"Include negatives: {include_negatives}")
-    logger.info(f"Output: {args.output_dir}")
-    logger.info("=" * 70)
-
-    # =========================================================================
-    # Load Data
-    # =========================================================================
-    logger.info("\n[1/4] Loading JSON datasets...")
-
-    data_config = LocalJSONConfig(
+    cfg = LocalJSONConfig(
         data_paths=args.data_paths,
         format_type="simple",
         include_negatives=include_negatives,
         validation_split=args.validation_split,
         language_filter=args.language_filter,
-        user_prefix=args.system_prompt,
         seed=args.seed,
-        use_chain_of_thought=not args.no_chain_of_thought,  # Enable CoT by default
+        use_chain_of_thought=False,
     )
+    loader = LocalJSONLoader(config=cfg)
+    dataset = loader.load()
+    stats = loader.get_statistics()
+    logger.info("Loaded %d samples from %d file(s)", stats["total_samples"], len(args.data_paths))
 
-    data_loader = LocalJSONLoader(config=data_config)
-    dataset = data_loader.load()
-
-    # Get statistics
-    stats = data_loader.get_statistics()
-    logger.info(f"Total samples: {stats['total_samples']}")
-    logger.info(f"Languages: {stats['languages']}")
-    logger.info(f"Categories: {stats['intention_categories']}")
-
-    # Handle split dataset
     if isinstance(dataset, dict):
-        train_dataset = dataset['train']
-        eval_dataset = dataset['test']
-        logger.info(f"Train: {len(train_dataset)}, Validation: {len(eval_dataset)}")
+        return dataset["train"], dataset["test"], stats
+    return dataset, None, stats
+
+
+def main() -> None:
+    args = parse_args()
+    validate_gpu()
+
+    configure_framework_logging(level=args.log_level)
+    logger = setup_logger("train_monolithic", level=args.log_level)
+
+    logger.info("=" * 70)
+    logger.info("MONOLITHIC BASELINE — single LoRA on all knowledge")
+    logger.info("=" * 70)
+    logger.info("Model       : %s", args.model_id)
+    logger.info("Quantization: %s", args.quantization)
+    logger.info("LoRA rank   : %d  alpha: %d", args.lora_r, args.lora_alpha)
+    logger.info("Max steps   : %d", args.max_steps)
+    logger.info("Data mode   : %s", "SituatedQA (combined)" if args.situatedqa else f"local JSON ({len(args.data_paths)} files)")
+    logger.info("Output      : %s", args.output_dir)
+    logger.info("=" * 70)
+
+    # -------------------------------------------------------------------------
+    # Load data
+    # -------------------------------------------------------------------------
+    logger.info("\n[1/4] Loading training data...")
+    eval_dataset = None
+    stats = {}
+
+    if args.situatedqa:
+        train_dataset, _ = load_situatedqa_combined(args, logger)
     else:
-        train_dataset = dataset
-        eval_dataset = None
-        logger.info(f"Train: {len(train_dataset)}, Validation: None")
+        train_dataset, eval_dataset, stats = load_local_json(args, logger)
 
-    # =========================================================================
-    # Initialize Model
-    # =========================================================================
-    logger.info("\n[2/4] Loading Frozen Foundation (base LLM)...")
+    # -------------------------------------------------------------------------
+    # Load model
+    # -------------------------------------------------------------------------
+    logger.info("\n[2/4] Loading frozen foundation...")
 
-    quant_map = {
-        "none": QuantizationType.NONE,
-        "int8": QuantizationType.INT8,
-        "int4": QuantizationType.INT4,
-    }
-
-    foundation_config = FrozenFoundationConfig(
+    quant_map = {"none": QuantizationType.NONE, "int8": QuantizationType.INT8, "int4": QuantizationType.INT4}
+    foundation_cfg = FrozenFoundationConfig(
         model_id=args.model_id,
         quantization=quant_map[args.quantization],
     )
-
-    llm = PatchAndRouteLLM(foundation_config=foundation_config)
+    llm = PatchAndRouteLLM(foundation_config=foundation_cfg)
     llm.load_frozen_foundation()
 
-    logger.info("\n[3/4] Attaching Expert Adapter (LoRA)...")
-
-    expert_config = ExpertConfig(
-        name="monolithic_baseline",
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-    )
-
-    llm.attach_expert(expert_config)
+    logger.info("\n[3/4] Attaching LoRA adapter...")
+    expert_cfg = ExpertConfig(name="monolithic_baseline", r=args.lora_r, lora_alpha=args.lora_alpha)
+    llm.attach_expert(expert_cfg)
     llm.print_model_info()
 
     model, tokenizer = llm.get_training_components()
 
-    # =========================================================================
-    # Training
-    # =========================================================================
-    logger.info("\n[4/4] Starting training...")
+    # -------------------------------------------------------------------------
+    # Train
+    # -------------------------------------------------------------------------
+    logger.info("\n[4/4] Training...")
 
-    training_config = TrainingConfig(
+    training_cfg = TrainingConfig(
         output_dir=args.output_dir,
         max_steps=args.max_steps,
         per_device_train_batch_size=args.batch_size,
@@ -385,11 +321,9 @@ def main() -> None:
         mlflow_run_name=args.run_name or "monolithic_baseline",
     )
 
-    # Convert Dataset to format expected by trainer
-    # The trainer expects a 'messages' field which our loader provides
     def formatting_func(example):
         return tokenizer.apply_chat_template(
-            example['messages'],
+            example["messages"],
             tokenize=False,
             add_generation_prompt=False,
         )
@@ -399,20 +333,20 @@ def main() -> None:
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        config=training_config,
+        config=training_cfg,
         formatting_func=formatting_func,
     )
 
     metrics = trainer.train()
 
-    # =========================================================================
-    # Save Final Checkpoint
-    # =========================================================================
+    # -------------------------------------------------------------------------
+    # Save
+    # -------------------------------------------------------------------------
     output_path = trainer.save_model()
 
-    # Save training configuration for reproducibility
     config_dict = {
         "training_type": "monolithic_baseline",
+        "data_mode": "situatedqa" if args.situatedqa else "local_json",
         "model_id": args.model_id,
         "quantization": args.quantization,
         "lora_r": args.lora_r,
@@ -420,10 +354,8 @@ def main() -> None:
         "max_steps": args.max_steps,
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
-        "data_paths": args.data_paths,
-        "include_negatives": include_negatives,
-        "language_filter": args.language_filter,
-        "system_prompt": args.system_prompt,
+        "cutoff_year": args.cutoff_year if args.situatedqa else None,
+        "data_paths": args.data_paths if not args.situatedqa else None,
         "seed": args.seed,
         "data_statistics": stats,
         "metrics": metrics,
@@ -431,14 +363,7 @@ def main() -> None:
     save_config(config_dict, output_path / "training_config.json")
 
     logger.info("\n" + "=" * 70)
-    logger.info("TRAINING COMPLETE")
-    logger.info("=" * 70)
-    logger.info(f"Adapter saved to: {output_path}")
-    logger.info("\nTo use this adapter:")
-    logger.info("  from src.models.core import PatchAndRouteLLM")
-    logger.info("  llm = PatchAndRouteLLM()")
-    logger.info("  llm.load_frozen_foundation()")
-    logger.info(f"  llm.load_expert('{output_path}')")
+    logger.info("TRAINING COMPLETE — adapter saved to: %s", output_path)
     logger.info("=" * 70)
 
 

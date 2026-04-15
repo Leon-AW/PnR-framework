@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 # Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data.loader import SituatedQALoader, SituatedQAConfig
 from src.models.core import (
@@ -182,6 +182,14 @@ def parse_args() -> argparse.Namespace:
         help="Steps between logging",
     )
     
+    # Optimizer
+    parser.add_argument(
+        "--optim",
+        type=str,
+        default="paged_adamw_8bit",
+        help="Optimizer: 'paged_adamw_8bit' (memory-efficient) or 'adamw_torch' (standard)",
+    )
+
     # Misc
     parser.add_argument(
         "--seed",
@@ -347,6 +355,8 @@ def main() -> None:
         max_seq_length=args.max_seq_length,
         seed=args.seed,
         dataset_buffer_size=args.buffer_size,
+        optim=args.optim,
+        dataloader_num_workers=1,
     )
     
     # =========================================================================

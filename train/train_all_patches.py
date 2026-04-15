@@ -32,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger("train_all")
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.data.loader import SituatedQALoader, SituatedQAConfig, is_us_location
 
 def get_top_countries(limit: int = 10) -> list[tuple[str, int]]:

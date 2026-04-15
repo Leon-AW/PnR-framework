@@ -98,12 +98,34 @@ def configure_framework_logging(
     """
     # Configure root framework logger
     setup_logger("pnr", level=level, log_file=log_file)
-    
+
+    # Configure the root logger so that training scripts using
+    # logging.getLogger(__name__) (where __name__ == "__main__") are captured.
+    # Without this, all INFO calls in train_*.py are silently dropped.
+    setup_logger("root", level=level, log_file=log_file)
+    # logging.getLogger("root") is NOT the root logger — use "" for that
+    root = logging.getLogger()
+    if isinstance(level, str):
+        level = getattr(logging, level.upper(), logging.INFO)
+    root.setLevel(level)
+    if not root.handlers:
+        formatter = logging.Formatter(DEFAULT_FORMAT, DEFAULT_DATE_FORMAT)
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(level)
+        ch.setFormatter(formatter)
+        root.addHandler(ch)
+        if log_file is not None:
+            from pathlib import Path as _Path
+            fh = logging.FileHandler(_Path(log_file))
+            fh.setLevel(level)
+            fh.setFormatter(formatter)
+            root.addHandler(fh)
+
     # Configure submodule loggers
     for module in ["pnr.data", "pnr.models", "pnr.training", "pnr.utils"]:
         logger = logging.getLogger(module)
         logger.setLevel(level)
-    
+
     # Also configure src.* loggers (alternative import path)
     for module in ["src", "src.data", "src.models", "src.training", "src.utils"]:
         logger = logging.getLogger(module)
