@@ -94,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embedding_model",
         type=str,
-        default=None,
+        default="sentence-transformers/all-MiniLM-L6-v2",
         help="Path to embedding model for the router",
     )
     parser.add_argument(

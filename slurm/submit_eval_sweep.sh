@@ -17,6 +17,7 @@ set -euo pipefail
 
 SCRIPT="slurm/eval_situated_qa.sh"
 CKPT="$(pwd)/checkpoints"
+ROUTER_STATE="$(pwd)/checkpoints/router_state"
 
 echo "Submitting SituatedQA evaluation sweep..."
 echo "Checkpoints dir : ${CKPT}"
@@ -54,6 +55,7 @@ echo "[3/7] lora_rag           → job ${JID3}"
 # 4. PnR routing — Time-Aware Centroid Router + Source-Replay
 # ------------------------------------------------------------------------------
 JID4=$(sbatch --job-name=eval_pnr "${SCRIPT}" \
+    --router_state "${ROUTER_STATE}" \
     --run_name pnr \
     | awk '{print $NF}')
 echo "[4/7] pnr                → job ${JID4}"
@@ -72,6 +74,7 @@ echo "[5/7] xlora              → job ${JID5}"
 # ------------------------------------------------------------------------------
 JID6=$(sbatch --job-name=eval_parallel "${SCRIPT}" \
     --parallel \
+    --router_state "${ROUTER_STATE}" \
     --run_name parallel_orchestrator \
     | awk '{print $NF}')
 echo "[6/7] parallel_orch      → job ${JID6}"
@@ -81,6 +84,7 @@ echo "[6/7] parallel_orch      → job ${JID6}"
 # ------------------------------------------------------------------------------
 JID7=$(sbatch --job-name=eval_morpheus "${SCRIPT}" \
     --morpheus \
+    --router_state "${ROUTER_STATE}" \
     --run_name morpheus \
     | awk '{print $NF}')
 echo "[7/7] morpheus           → job ${JID7}"

@@ -326,9 +326,20 @@ class EvalRunner:
             do_sample=self.config.do_sample,
         )
 
+        # Load embedding model so PrototypeRouter can compute similarities.
+        # PrototypeRouterConfig stores the path but doesn't auto-load; we build
+        # the callable here and pass it explicitly.
+        embedding_fn = None
+        if self.config.embedding_model:
+            from sentence_transformers import SentenceTransformer
+            import numpy as np
+            _enc = SentenceTransformer(self.config.embedding_model)
+            embedding_fn = lambda text: _enc.encode(text, normalize_embeddings=True).astype(np.float32)
+
         pipeline = MorpheusInference(
             config=morpheus_config,
             generation_config=gen_config,
+            embedding_fn=embedding_fn,
         )
 
         # Register adapters from checkpoints directory

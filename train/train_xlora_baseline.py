@@ -494,7 +494,7 @@ def main() -> None:
             "xlora_size": 2048,
             "enable_softmax": True,
             "enable_softmax_topk": False,
-            "layerwise_scalings": False,
+            "layerwise_scalings": True,
             "enable_relu_and_dropout": True,
             "use_bias": True,
             "xlora_dropout_p": 0.2,

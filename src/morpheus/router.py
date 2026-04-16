@@ -86,6 +86,12 @@ class PrototypeRouter(BaseRouter):
         self.config = config or PrototypeRouterConfig()
         self._embedding_fn = embedding_fn
         self._embedding_batch_fn = embedding_batch_fn
+
+        # Auto-detect actual embedding dimension from the function if provided,
+        # rather than relying on the default (768) which may not match the model.
+        if embedding_fn is not None:
+            _probe = embedding_fn("test")
+            embedding_dim = int(_probe.shape[0])
         self._embedding_dim = embedding_dim
 
         self._prototypes: dict[str, ExpertPrototype] = {}

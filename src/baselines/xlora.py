@@ -151,12 +151,22 @@ class XLoRAInference:
 
         # Wrap with X-LoRA gating (loads xlora_config.json + xlora_classifier.pt)
         device_str = "cuda" if (self.use_gpu and torch.cuda.is_available()) else "cpu"
+
+        # The xlora library has a bug: from_pretrained sets conf["adapters"] = None
+        # before creating xLoRAConfig, overwriting the adapters loaded from the JSON.
+        # Workaround: load the adapters dict explicitly and pass it in.
+        import json as _json
+        _config_path = self.xlora_checkpoint / "xlora_config.json"
+        with open(_config_path) as _f:
+            _adapters = _json.load(_f).get("adapters")
+
         self._model = xlora.from_pretrained(
             load_directory=str(self.xlora_checkpoint),
             model=base_model,
             device=device_str,
             from_safetensors=False,  # we save as .pt, not safetensors
             verbose=False,
+            adapters=_adapters,  # explicit pass bypasses the library bug
         )
         self._model.eval()
 

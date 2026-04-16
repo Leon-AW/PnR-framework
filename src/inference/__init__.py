@@ -13,7 +13,7 @@ Modules:
 - convert_to_gguf: GGUF format conversion
 """
 
-from src.inference.pnr import PatchAndRouteInference, GenerationConfig
+from src.inference.pnr import PatchAndRouteInference, GenerationConfig, PromptBuilder, generate_text
 from src.inference.vanilla_rag import VanillaRAG, VanillaRAGConfig
 from src.inference.embeddings import EmbeddingModel, EmbeddingConfig
 from src.inference.vector_store import (
@@ -29,6 +29,8 @@ __all__ = [
     # PnR inference (was src/inference.py — now src/inference/pnr.py)
     "PatchAndRouteInference",
     "GenerationConfig",
+    "PromptBuilder",
+    "generate_text",
     # RAG
     "VanillaRAG",
     "VanillaRAGConfig",
