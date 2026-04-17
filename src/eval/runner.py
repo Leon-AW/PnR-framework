@@ -101,6 +101,12 @@ class EvalConfig:
     xlora_checkpoint: str | None = None  # Path to X-LoRA gating checkpoint
     morpheus: bool = False  # Use MORPHEUS multi-system architecture
     morpheus_state_dir: str | None = None  # Path to MORPHEUS state directory
+    # MORPHEUS' PrototypeRouter applies a fixed JL random projection (384→256)
+    # before computing cosine similarity, so similarities are systematically
+    # lower than the raw-space CentroidRouter used by PnR. Using the shared
+    # `similarity_threshold=0.65` there would reject most valid routes. The
+    # value below is the native default of `PrototypeRouterConfig`.
+    morpheus_similarity_threshold: float = 0.55
     parallel_orchestrator: bool = False  # Use Parallel-Orchestrator architecture
     parallel_max_adapters: int = 5  # Max adapters for parallel execution
     parallel_query_planner: str = "heuristic"  # "heuristic" or "llm"
@@ -310,7 +316,7 @@ class EvalRunner:
         )
         router_config = PrototypeRouterConfig(
             embedding_model_path=self.config.embedding_model,
-            similarity_threshold=self.config.similarity_threshold,
+            similarity_threshold=self.config.morpheus_similarity_threshold,
             use_gpu=use_gpu,
         )
         morpheus_config = MorpheusConfig(
@@ -342,21 +348,66 @@ class EvalRunner:
             embedding_fn=embedding_fn,
         )
 
-        # Register adapters from checkpoints directory
-        checkpoints_dir = Path(self.config.checkpoints_dir)
-        if checkpoints_dir.exists():
-            router = pipeline.get_router()
-            n_registered = 0
-            for adapter_dir in sorted(checkpoints_dir.iterdir()):
-                if adapter_dir.is_dir() and (adapter_dir / "adapter_config.json").exists():
-                    adapter_id = adapter_dir.name
-                    router.register_adapter(
-                        adapter_id=adapter_id,
-                        path=str(adapter_dir),
-                        timestamp=adapter_dir.stat().st_mtime,
+        # Register adapters with prototype centroids.
+        #
+        # CRITICAL: `PrototypeRouter.register_adapter` defaults to a ZERO
+        # centroid when none is provided, which collapses routing (sim == 0
+        # for every expert → every query falls below `similarity_threshold`
+        # → winner_adapter=None).  We therefore load real centroids from the
+        # same `router_state/manifest.json` that the PnR/Parallel Orchestrator
+        # use, and fall back to the checkpoints directory only if no manifest
+        # is available (logging a loud warning in that case).
+        import json
+        import numpy as np
+
+        router = pipeline.get_router()
+        n_registered = 0
+        manifest_path = None
+        if self.config.router_state_path:
+            candidate = Path(self.config.router_state_path) / "manifest.json"
+            if candidate.exists():
+                manifest_path = candidate
+
+        if manifest_path is not None:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            for adapter_id, info in manifest.get("adapters", {}).items():
+                centroid_list = info.get("centroid")
+                if centroid_list is None:
+                    logger.warning(
+                        f"Manifest entry for {adapter_id} has no centroid — skipping"
                     )
-                    n_registered += 1
-            logger.info(f"Registered {n_registered} adapters with MORPHEUS router")
+                    continue
+                centroid = np.asarray(centroid_list, dtype=np.float32)
+                router.register_adapter(
+                    adapter_id=adapter_id,
+                    path=info.get("adapter_path", ""),
+                    timestamp=float(info.get("timestamp", 0.0)),
+                    centroid=centroid,
+                )
+                n_registered += 1
+            logger.info(
+                f"Registered {n_registered} adapters with MORPHEUS router "
+                f"from {manifest_path}"
+            )
+        else:
+            logger.warning(
+                "No router_state manifest found; registering adapters WITHOUT "
+                "centroids. MORPHEUS routing will not work until centroids are "
+                "provided. Pass --router_state <dir> pointing at a manifest.json."
+            )
+            checkpoints_dir = Path(self.config.checkpoints_dir)
+            if checkpoints_dir.exists():
+                for adapter_dir in sorted(checkpoints_dir.iterdir()):
+                    if adapter_dir.is_dir() and (adapter_dir / "adapter_config.json").exists():
+                        adapter_id = adapter_dir.name
+                        router.register_adapter(
+                            adapter_id=adapter_id,
+                            path=str(adapter_dir),
+                            timestamp=adapter_dir.stat().st_mtime,
+                        )
+                        n_registered += 1
+                logger.info(f"Registered {n_registered} adapters with MORPHEUS router")
 
         return pipeline
 

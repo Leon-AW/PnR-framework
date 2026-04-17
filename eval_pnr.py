@@ -222,6 +222,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to MORPHEUS state directory (router state, expert bank, knowledge store)",
     )
+    parser.add_argument(
+        "--morpheus_similarity_threshold",
+        type=float,
+        default=0.55,
+        help=(
+            "Similarity threshold for the MORPHEUS PrototypeRouter. "
+            "The router applies a JL random projection before cosine "
+            "similarity, so the raw-space default (0.65) is too strict "
+            "and suppresses most valid routes."
+        ),
+    )
 
     # Generation configuration
     parser.add_argument(
@@ -320,6 +331,7 @@ def main() -> None:
         parallel_synthesis_tokens=args.parallel_synth_tokens,
         morpheus=args.morpheus,
         morpheus_state_dir=args.morpheus_state_dir,
+        morpheus_similarity_threshold=args.morpheus_similarity_threshold,
         recipe_official_checkpoint=args.recipe_official,
         recipe_official_edits_path=args.recipe_official_edits,
         max_new_tokens=args.max_new_tokens,

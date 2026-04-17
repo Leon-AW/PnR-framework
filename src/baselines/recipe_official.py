@@ -153,26 +153,27 @@ class RECIPEOfficialInference:
         assert self._editor is not None
         assert self._tokenizer is not None
 
-        # Use the model's chat template so Mistral-Instruct sees a well-formed prompt.
-        messages = [{"role": "user", "content": query}]
-        try:
-            chat_prompt = self._tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        except Exception:
-            chat_prompt = f"User: {query}\nAssistant:"
-
-        tok = self._tokenizer(chat_prompt, return_tensors="pt", truncation=True, max_length=4096)
+        # RECIPE was trained on completion-style prompts: `pt2xym(prompt, target)`
+        # tokenizes `prompt + " " + target` and trains the continuous prompt to
+        # steer next-token prediction at the end of `prompt`. Wrapping `query`
+        # in Mistral-Instruct's chat template pushes `[/INST]` between RECIPE's
+        # injected prompt and the generation point, diluting the edit's effect
+        # and letting the instruct prior dominate with verbose essay answers.
+        # Feed the raw query — matches recipe.py::edit_batch and data.py::pt2xym.
+        tok = self._tokenizer(query, return_tensors="pt", truncation=True, max_length=4096)
         model = self._editor.model
         llm_device = next(model.parameters()).device
         input_ids = tok["input_ids"].to(llm_device)
         attention_mask = tok["attention_mask"].to(llm_device)
 
+        # Cap at 30 tokens: RECIPE edits are factoid completions, not essays.
+        max_new = min(self.max_new_tokens, 30)
+
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=max_new,
                 do_sample=self.do_sample,
                 temperature=self.temperature if self.do_sample else None,
                 pad_token_id=self._tokenizer.pad_token_id,
@@ -182,6 +183,12 @@ class RECIPEOfficialInference:
 
         prompt_len = input_ids.shape[1]
         response = self._tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=True).strip()
+
+        # Completion semantics: first line / first sentence is the answer.
+        for sep in ("\n", "."):
+            if sep in response:
+                response = response[: response.index(sep)].strip()
+                break
 
         # Introspect whether the editor injected a prompt for this query
         adopted = getattr(self._editor, "adopted_prompts", [])
