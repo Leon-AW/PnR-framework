@@ -235,7 +235,7 @@ class KnowledgeStore:
     def assess_factuality(
         self,
         query_embedding: np.ndarray,
-        factuality_score: float,
+        factuality_score: float | None = None,
         novelty_level: float = 0.0,
     ) -> FactualityDecision:
         """Assess whether System 5 should override parametric output.
@@ -251,7 +251,13 @@ class KnowledgeStore:
 
         Args:
             query_embedding: Embedded query vector.
-            factuality_score: Continuous score in [0, 1] from classifier.
+            factuality_score: Continuous score in [0, 1] from a learned
+                classifier (arch doc §249). When ``None`` (the default), the
+                score is derived from retrieval evidence: ``max_sim`` of the
+                top-k KB matches serves as the proxy. A tight KB hit is
+                strong evidence the query concerns a stored fact, which is
+                precisely what the classifier would score high anyway. Pass
+                an explicit value once a trained classifier is available.
             novelty_level: Distribution novelty from meta-controller [0, 1].
 
         Returns:
@@ -265,6 +271,13 @@ class KnowledgeStore:
         records_result = self.search(query_embedding, top_k=3)
         records = [r for r, _ in records_result]
         max_sim = max((s for _, s in records_result), default=0.0)
+
+        # Retrieval-driven default: use KB similarity as the factuality proxy.
+        # Without this, a hardcoded mid-range score (e.g. 0.5) never exceeds
+        # tau_high=0.8, so hard_override is unreachable and the entire
+        # graduated-factuality hierarchy collapses to "always boundary".
+        if factuality_score is None:
+            factuality_score = max_sim
 
         if factuality_score > tau_high and records and max_sim > 0.5:
             zone = "hard_override"

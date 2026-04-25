@@ -36,13 +36,22 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AdapterEntry:
     """Entry for a single adapter in the manifest.
-    
+
     Attributes:
         adapter_id: Unique identifier (e.g., "patch_geo_germany").
         adapter_path: Filesystem path to adapter checkpoint.
         timestamp: Training timestamp (epoch seconds).
         adapter_type: Type classification ("base", "patch_temporal", "patch_geo").
-        centroid: Mean embedding vector of training data (optional until computed).
+        centroid: Mean embedding vector of training data (optional until
+            computed). For broad-domain adapters (e.g. `patch_cf_main`) whose
+            training data spans many heterogeneous facts, the single mean
+            collapses near origin and loses discriminative power — use
+            `cluster_centroids` instead. `centroid` is still populated for
+            callers that just want a single representative vector.
+        cluster_centroids: Optional list of k k-means centroids covering the
+            adapter's training distribution. When present, the router uses
+            max_i(query · centroid_i) instead of query · mean to decide
+            membership. None = single-centroid mode (legacy / narrow adapters).
         source_data_path: Path to training data for Source-Replay.
         metadata: Additional adapter-specific metadata.
     """
@@ -51,13 +60,19 @@ class AdapterEntry:
     timestamp: float
     adapter_type: str = "unknown"
     centroid: np.ndarray | None = None
+    cluster_centroids: list[np.ndarray] | None = None
     source_data_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    
+
     @property
     def has_centroid(self) -> bool:
         """Check if centroid has been computed."""
         return self.centroid is not None
+
+    @property
+    def num_clusters(self) -> int:
+        """Number of cluster centroids (0 if only single-centroid mode)."""
+        return len(self.cluster_centroids) if self.cluster_centroids else 0
     
     @property
     def timestamp_dt(self) -> datetime:
@@ -91,7 +106,10 @@ class AdapterEntry:
         
         if include_centroid and self.centroid is not None:
             result["centroid"] = self.centroid.tolist()
-        
+
+        if include_centroid and self.cluster_centroids:
+            result["cluster_centroids"] = [c.tolist() for c in self.cluster_centroids]
+
         return result
     
     @classmethod
@@ -107,13 +125,20 @@ class AdapterEntry:
         centroid = None
         if "centroid" in data and data["centroid"] is not None:
             centroid = np.array(data["centroid"], dtype=np.float32)
-        
+
+        cluster_centroids = None
+        if "cluster_centroids" in data and data["cluster_centroids"]:
+            cluster_centroids = [
+                np.array(c, dtype=np.float32) for c in data["cluster_centroids"]
+            ]
+
         return cls(
             adapter_id=data["adapter_id"],
             adapter_path=data["adapter_path"],
             timestamp=data["timestamp"],
             adapter_type=data.get("adapter_type", "unknown"),
             centroid=centroid,
+            cluster_centroids=cluster_centroids,
             source_data_path=data.get("source_data_path"),
             metadata=data.get("metadata", {}),
         )
@@ -279,7 +304,51 @@ class AdapterManifest:
         
         self._entries[adapter_id].centroid = centroid.astype(np.float32)
         logger.info(f"Updated centroid for adapter: {adapter_id} (dim={centroid.shape[0]})")
-    
+
+    def update_cluster_centroids(
+        self,
+        adapter_id: str,
+        cluster_centroids: list[np.ndarray],
+    ) -> None:
+        """Store k cluster centroids for an adapter.
+
+        Also refreshes the single `centroid` field to the normalized mean of
+        the clusters, so legacy consumers (e.g., ParallelOrchestrator's
+        similarity-distribution heuristic) keep working with a representative
+        vector.
+
+        Args:
+            adapter_id: The adapter to update.
+            cluster_centroids: List of k normalized cluster centroid vectors.
+
+        Raises:
+            KeyError: If adapter not found.
+            ValueError: If list is empty or centroids have inconsistent shapes.
+        """
+        if adapter_id not in self._entries:
+            raise KeyError(f"Adapter '{adapter_id}' not found in manifest")
+        if not cluster_centroids:
+            raise ValueError("cluster_centroids must be non-empty")
+
+        clusters = [np.asarray(c, dtype=np.float32) for c in cluster_centroids]
+        shapes = {c.shape for c in clusters}
+        if len(shapes) != 1:
+            raise ValueError(f"Cluster centroids have inconsistent shapes: {shapes}")
+
+        entry = self._entries[adapter_id]
+        entry.cluster_centroids = clusters
+
+        mean = np.mean(np.vstack(clusters), axis=0)
+        norm = np.linalg.norm(mean)
+        if norm > 0:
+            mean = mean / norm
+        entry.centroid = mean.astype(np.float32)
+
+        logger.info(
+            f"Updated cluster centroids for adapter: {adapter_id} "
+            f"(k={len(clusters)}, dim={clusters[0].shape[0]})"
+        )
+
     # -------------------------------------------------------------------------
     # Querying
     # -------------------------------------------------------------------------
@@ -328,9 +397,40 @@ class AdapterManifest:
         
         adapter_ids = [e.adapter_id for e in entries]
         centroids = np.vstack([e.centroid for e in entries])
-        
+
         return centroids, adapter_ids
-    
+
+    def get_cluster_centroids_flat(self) -> tuple[np.ndarray, list[str]]:
+        """Get all cluster centroids stacked as one matrix, plus per-row adapter IDs.
+
+        An adapter with `cluster_centroids=[c1, c2, c3]` contributes 3 rows; an
+        adapter with only `centroid` (no clusters) contributes 1 row. The router
+        groups rows by adapter ID and takes the max similarity per group to
+        decide routing — this lets broad adapters (patch_cf_main) cover
+        disjoint subdomains without collapsing their mean near origin.
+
+        Returns:
+            Tuple of (matrix (sum_of_k, dim), adapter_id_per_row list).
+
+        Raises:
+            ValueError: If no adapters have any centroids.
+        """
+        rows: list[np.ndarray] = []
+        row_ids: list[str] = []
+        for entry in self._entries.values():
+            if entry.cluster_centroids:
+                for c in entry.cluster_centroids:
+                    rows.append(c)
+                    row_ids.append(entry.adapter_id)
+            elif entry.centroid is not None:
+                rows.append(entry.centroid)
+                row_ids.append(entry.adapter_id)
+
+        if not rows:
+            raise ValueError("No adapters have computed centroids")
+
+        return np.vstack(rows).astype(np.float32), row_ids
+
     # -------------------------------------------------------------------------
     # Persistence
     # -------------------------------------------------------------------------

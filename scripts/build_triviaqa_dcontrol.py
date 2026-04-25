@@ -70,15 +70,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def format_prompt(question: str, tokenizer) -> str:
-    """Format as raw Mistral chat message — matches PnR inference exactly.
+# Prepended verbatim to every TriviaQA question so the frozen base model is
+# biased toward short, EM-scorable answers rather than verbose explanations.
+# MUST match the transform applied in
+# `src/eval/dataset.py::build_triviaqa_control_dataset` — CF eval re-tokenizes
+# the stored question through the same chat template, so any divergence here
+# breaks the D_control pre-filter guarantee (exposé §4.1).
+SHORT_ANSWER_INSTRUCTION = (
+    "Answer the following question with just the answer — no explanation, "
+    "no full sentence, only the shortest possible phrase. Question: "
+)
 
-    Must stay in sync with `src/inference/pnr.py::_build_prompt` so that any
-    question verified here is also verified in the exact form PnR eval will
-    present it at inference time. Accuracy drops on D_control can then be
-    attributed unambiguously to routing interference (exposé §4.1).
+
+def wrap_question(question: str) -> str:
+    """Apply the D_control short-answer transform to a raw question."""
+    return f"{SHORT_ANSWER_INSTRUCTION}{question}"
+
+
+def format_prompt(question: str, tokenizer) -> str:
+    """Format as a Mistral chat message with the short-answer instruction.
+
+    The instruction is folded into the user turn (not a system prompt) so the
+    chat template remains byte-identical in shape to what PnR's CF eval path
+    produces via ``build_triviaqa_control_dataset`` → ``pipeline.generate``.
+    Both sites prepend ``SHORT_ANSWER_INSTRUCTION`` before letting the
+    tokenizer apply the chat template, so the verification reflects exactly
+    the input the frozen base will see at eval time.
     """
-    messages = [{"role": "user", "content": question}]
+    messages = [{"role": "user", "content": wrap_question(question)}]
     return tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -266,8 +285,15 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Save
     # ------------------------------------------------------------------
+    # Wrap in an object so downstream tools get the same SHORT_ANSWER_INSTRUCTION
+    # the verification used — prevents future silent divergence at eval time.
+    payload = {
+        "short_answer_instruction": SHORT_ANSWER_INSTRUCTION,
+        "model_id": args.model_id,
+        "records": verified,
+    }
     with open(output_path, "w") as f:
-        json.dump(verified, f, indent=2, ensure_ascii=False)
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
     logger.info(f"\nSaved {len(verified):,} D_control pairs → {output_path}")
     logger.info("\nNext steps:")

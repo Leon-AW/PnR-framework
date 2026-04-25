@@ -210,11 +210,18 @@ class XLoRAInference:
         device = next(self._model.parameters()).device
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
+        # SituatedQA gold answers are short factoids (years, names, places).
+        # The default max_new_tokens=256 lets the model loop into noisy repetition
+        # ("Lionel Messi's Cristiano Ronal Lionel Lionel ..."). The right
+        # answer is usually in the first few tokens but gets buried, killing
+        # token-level F1. Cap at 30, then truncate at the first sentence/line.
+        max_new = min(self.max_new_tokens, 30)
         gen_kwargs: dict[str, Any] = {
-            "max_new_tokens": self.max_new_tokens,
+            "max_new_tokens": max_new,
             "do_sample": self.do_sample,
             "pad_token_id": self._tokenizer.pad_token_id,
             "eos_token_id": self._tokenizer.eos_token_id,
+            "repetition_penalty": 1.3,
         }
         if self.do_sample:
             gen_kwargs["temperature"] = self.temperature
@@ -226,5 +233,10 @@ class XLoRAInference:
         response = self._tokenizer.decode(
             outputs[0][prompt_len:], skip_special_tokens=True
         ).strip()
+
+        for sep in ("\n", "."):
+            if sep in response:
+                response = response[: response.index(sep)].strip()
+                break
 
         return XLoRAInferenceResult(response=response)

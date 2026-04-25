@@ -169,6 +169,17 @@ class RECIPEOfficialInference:
         # Cap at 30 tokens: RECIPE edits are factoid completions, not essays.
         max_new = min(self.max_new_tokens, 30)
 
+        # use_cache=False is REQUIRED. RECIPE's begin_layer hook prepends
+        # prompt_token_n continuous prompts to the input embeddings on the
+        # first forward; the wrapped model.forward extends cache_position +
+        # position_ids by the same amount so position 0..N+extra-1 land in
+        # the cache correctly. But on every subsequent generation step,
+        # `is_first_pass=False` short-circuits all the position/cache fixes
+        # (recipe.py:133-138), while transformers.generate still writes the
+        # next token to cache_position=N — overwriting a cached prompt token
+        # and reading from the wrong slot. Result: TF accuracy 0.88 vs
+        # generation EM 0.001. Disabling the cache forces every step through
+        # the first-pass branch, which is correct.
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
@@ -178,7 +189,7 @@ class RECIPEOfficialInference:
                 temperature=self.temperature if self.do_sample else None,
                 pad_token_id=self._tokenizer.pad_token_id,
                 eos_token_id=self._tokenizer.eos_token_id,
-                use_cache=True,
+                use_cache=False,
             )
 
         prompt_len = input_ids.shape[1]

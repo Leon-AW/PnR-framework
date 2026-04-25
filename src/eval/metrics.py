@@ -14,6 +14,7 @@ Metrics implemented:
 - compute_routing_accuracy: fraction routed to expected adapter
 - compute_stability_score: exact-match on "base" split (forgetting detection)
 - compute_cfr: Catastrophic Forgetting Rate (PnR vs baseline)
+- compute_dcontrol_forgetting_rate: forgetting on D_control (TriviaQA pre-filtered to 100% base accuracy)
 - compute_efficiency: latency and VRAM statistics
 """
 
@@ -183,28 +184,30 @@ def compute_stability_score(results: list[EvalResult]) -> float | None:
 def compute_cfr(
     pnr_results: list[EvalResult],
     baseline_results: list[EvalResult],
+    split_filter: str = "base",
 ) -> float | None:
-    """Catastrophic Forgetting Rate: how much worse PnR is vs baseline on base split.
+    """Catastrophic Forgetting Rate: how much worse PnR is vs baseline on a split.
 
     CFR = (baseline_acc - pnr_acc) / baseline_acc
 
     A positive CFR means PnR forgot knowledge the baseline retained.
-    A negative CFR means PnR is *better* than baseline on base knowledge.
+    A negative CFR means PnR is *better* than baseline on that split.
 
-    Samples are matched by question text.
+    Samples are matched by question text. Pass ``split_filter='cf_control'`` to
+    compute interference on the TriviaQA control set used by the CounterFact
+    evaluation; default ``'base'`` preserves the SituatedQA behaviour.
 
     Args:
         pnr_results: PnR system evaluation results.
-        baseline_results: Monolithic baseline evaluation results.
+        baseline_results: No-adapter / monolithic baseline evaluation results.
+        split_filter: Split to restrict the comparison to.
 
     Returns:
         CFR as a fraction, or None if insufficient data.
     """
-    # Filter to base split
-    pnr_base = {r.sample.question: r.is_exact_match for r in pnr_results if r.sample.split == "base"}
-    baseline_base = {r.sample.question: r.is_exact_match for r in baseline_results if r.sample.split == "base"}
+    pnr_base = {r.sample.question: r.is_exact_match for r in pnr_results if r.sample.split == split_filter}
+    baseline_base = {r.sample.question: r.is_exact_match for r in baseline_results if r.sample.split == split_filter}
 
-    # Intersect on matching questions
     shared_questions = set(pnr_base.keys()) & set(baseline_base.keys())
     if not shared_questions:
         return None
@@ -216,6 +219,30 @@ def compute_cfr(
         return None
 
     return (baseline_acc - pnr_acc) / baseline_acc
+
+
+def compute_dcontrol_forgetting_rate(results: list[EvalResult]) -> float | None:
+    """Forgetting rate on the TriviaQA D_control set.
+
+    D_control was pre-filtered so the frozen base model answered every question
+    correctly (baseline accuracy = 1.0 by construction). Any drop is therefore
+    pure routing/interference-induced forgetting:
+
+        FR = 1.0 - accuracy_on_cf_control
+
+    No separate baseline run is required.
+
+    Args:
+        results: Evaluation results containing cf_control samples.
+
+    Returns:
+        Forgetting rate in [0, 1], or None if no cf_control samples.
+    """
+    ctrl = [r for r in results if r.sample.split == "cf_control"]
+    if not ctrl:
+        return None
+    accuracy = sum(1 for r in ctrl if r.is_exact_match) / len(ctrl)
+    return round(1.0 - accuracy, 4)
 
 
 def compute_efficiency(results: list[EvalResult]) -> dict[str, float]:

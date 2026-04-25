@@ -357,25 +357,72 @@ class CentroidRouter(BaseRouter):
     
     def compute_centroid(self, texts: list[str]) -> np.ndarray:
         """Compute centroid (mean vector) of multiple texts.
-        
+
         Args:
             texts: List of training texts.
-            
+
         Returns:
             Mean embedding vector (normalized).
         """
         if not texts:
             raise ValueError("Cannot compute centroid of empty text list")
-        
+
         embeddings = np.vstack([self.compute_embedding(t) for t in texts])
-        
+
         # Mean of normalized vectors
         centroid = np.mean(embeddings, axis=0)
-        
+
         # Re-normalize
         centroid = centroid / np.linalg.norm(centroid)
-        
+
         return centroid.astype(np.float32)
+
+    def compute_cluster_centroids(
+        self,
+        texts: list[str],
+        k: int,
+        batch_size: int = 64,
+        random_state: int = 42,
+    ) -> list[np.ndarray]:
+        """Run k-means over text embeddings and return k normalized cluster centroids.
+
+        Intended for broad-domain adapters (e.g. patch_cf_main spanning 21k
+        heterogeneous facts) where a single mean centroid collapses near origin
+        and gets dominated by narrow specialists. Each cluster captures a
+        subdomain (e.g. "languages of places", "creators of products", …); the
+        router takes max over clusters.
+
+        Args:
+            texts: Training texts (≥ k).
+            k: Number of clusters. Falls back to k=1 (plain mean) if
+                len(texts) < k.
+            batch_size: Embedding batch size.
+            random_state: Seed for reproducible k-means.
+
+        Returns:
+            List of k L2-normalized centroids of shape (embedding_dim,).
+        """
+        from sklearn.cluster import KMeans
+
+        if not texts:
+            raise ValueError("Cannot cluster empty text list")
+
+        if k <= 1 or len(texts) <= k:
+            return [self.compute_centroid(texts)]
+
+        embeddings = self.compute_embeddings_batch(texts, batch_size=batch_size)
+
+        km = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+        km.fit(embeddings)
+
+        centroids: list[np.ndarray] = []
+        for i in range(k):
+            raw = km.cluster_centers_[i]
+            norm = np.linalg.norm(raw)
+            c = raw / norm if norm > 0 else raw
+            centroids.append(c.astype(np.float32))
+
+        return centroids
     
     # -------------------------------------------------------------------------
     # Adapter Registration
@@ -659,11 +706,11 @@ class CentroidRouter(BaseRouter):
         # Step 1: Embed query
         query_embedding = self.compute_embedding(query)
         
-        # Step 2: Get all centroids
+        # Step 2: Get all cluster centroids (flat matrix, one row per cluster;
+        # adapters with only a single mean centroid contribute one row)
         try:
-            centroids, adapter_ids = self._manifest.get_centroids_matrix()
+            centroids, row_adapter_ids = self._manifest.get_cluster_centroids_flat()
         except ValueError:
-            # No adapters with centroids
             logger.warning("No adapters with centroids found")
             return RoutingResult(
                 winner_adapter=None,
@@ -674,19 +721,28 @@ class CentroidRouter(BaseRouter):
                 has_conflict=False,
                 routing_strategy=RoutingStrategy.CENTROID,
             )
-        
-        # Step 3: Compute similarities (cosine on normalized vectors = dot product)
+
+        # Step 3: Compute similarities (cosine on normalized vectors = dot product).
+        # Row-level sims are per-cluster; we then aggregate max-per-adapter so a
+        # broad-domain adapter (e.g. patch_cf_main) wins as soon as ANY of its
+        # subdomain cluster centroids matches the query.
         query_norm = query_embedding / np.linalg.norm(query_embedding)
-        similarities = np.dot(centroids, query_norm)
-        
+        row_similarities = np.dot(centroids, query_norm)
+
+        best_sim_per_adapter: dict[str, float] = {}
+        for adapter_id, sim in zip(row_adapter_ids, row_similarities):
+            s = float(sim)
+            if s > best_sim_per_adapter.get(adapter_id, -np.inf):
+                best_sim_per_adapter[adapter_id] = s
+
         # Step 4: Filter matches above threshold
         matches = []
-        for i, (adapter_id, sim) in enumerate(zip(adapter_ids, similarities)):
+        for adapter_id, sim in best_sim_per_adapter.items():
             if sim >= self.similarity_threshold:
                 entry = self._manifest[adapter_id]
                 matches.append(AdapterMatch(
                     adapter_id=adapter_id,
-                    similarity=float(sim),
+                    similarity=sim,
                     timestamp=entry.timestamp,
                     is_winner=False,
                 ))

@@ -197,7 +197,20 @@ class MorpheusInference:
         self._expert_bank = expert_bank or ExpertBank(self.config.expert_bank)
         self._router = router
         self._buffer = fast_buffer or FastBuffer(self.config.fast_buffer)
-        self._knowledge_store = knowledge_store or KnowledgeStore(self.config.knowledge_store)
+        if knowledge_store is not None:
+            self._knowledge_store = knowledge_store
+        else:
+            # Auto-load persisted records if the seed script has populated
+            # `store_dir`; otherwise fall through to an empty store. This
+            # activates the graduated-factuality protocol without forcing
+            # callers to remember a separate load step.
+            store_dir = Path(self.config.knowledge_store.store_dir)
+            if (store_dir / "records.json").exists():
+                self._knowledge_store = KnowledgeStore.load(
+                    store_dir, self.config.knowledge_store
+                )
+            else:
+                self._knowledge_store = KnowledgeStore(self.config.knowledge_store)
         self._consolidation = consolidation
         self._meta = meta_controller or MetaController(self.config.meta_controller)
 
@@ -316,9 +329,13 @@ class MorpheusInference:
         if self._embedding_fn and not skip_routing:
             query_emb = self._embedding_fn(query)
 
+            # factuality_score=None → KnowledgeStore derives it from retrieval
+            # max_sim (see knowledge_store.assess_factuality). This activates
+            # the hard_override path when the KB has a tight semantic match,
+            # which is the arch-doc §249 behaviour minus a trained classifier.
             factuality_decision = self._knowledge_store.assess_factuality(
                 query_embedding=query_emb,
-                factuality_score=0.5,  # Default; real classifier would provide this
+                factuality_score=None,
                 novelty_level=novelty_level,
             )
 
@@ -332,6 +349,34 @@ class MorpheusInference:
                     factuality_decision.system5_records,
                 )
                 uncertainty_signal = factuality_decision.uncertainty_signal
+
+        # Step 3b: Authoritative-override bypass.
+        # Arch §236: "factual content must come from System 5. System 1 provides
+        # linguistic scaffolding only, not factual assertions." When a hard
+        # override fires on a near-exact retrieval (max_sim above the bypass
+        # threshold), the stored object_value IS the answer — forwarding it to
+        # the LLM only gives parametric belief an opportunity to overwrite it
+        # with a hallucinated alternative (observed empirically: "as of 1990"
+        # query retrieves 1984 but model outputs 1996). Skip generation.
+        bypass_threshold = self.config.knowledge_store.direct_answer_threshold
+        if (
+            factuality_decision is not None
+            and factuality_decision.zone == "hard_override"
+            and factuality_decision.confidence >= bypass_threshold
+            and factuality_decision.system5_records
+        ):
+            top_record = factuality_decision.system5_records[0]
+            return MorpheusInferenceResult(
+                response=top_record.object_value,
+                routing_result=routing_result,
+                adapter_loaded=adapter_loaded,
+                full_prompt="[bypassed: hard_override authoritative]",
+                generation_config=gen_config,
+                factuality_decision=factuality_decision,
+                knowledge_override=True,
+                novelty_level=novelty_level,
+                routing_confidence=routing_confidence,
+            )
 
         # Step 4: Build prompt
         prompt = self._prompt_builder.build(

@@ -210,6 +210,41 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    # CounterFact + TriviaQA (D_conflict / D_control splits)
+    parser.add_argument(
+        "--counterfact_eval_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to data/counterfact_eval.json (produced by "
+            "scripts/build_counterfact_data.py). Required when --eval_sets "
+            "includes 'cf_conflict'."
+        ),
+    )
+    parser.add_argument(
+        "--triviaqa_dcontrol_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to data/triviaqa_dcontrol.json (produced by "
+            "scripts/build_triviaqa_dcontrol.py). Required when --eval_sets "
+            "includes 'cf_control'."
+        ),
+    )
+    parser.add_argument(
+        "--cf_adapter_name",
+        type=str,
+        default="patch_cf_main",
+        help="Adapter the router should pick for CounterFact D_conflict samples",
+    )
+    parser.add_argument(
+        "--cf_split_name",
+        type=str,
+        choices=["train", "test"],
+        default="test",
+        help="Which CounterFact split to evaluate on (held-out 'test' by default)",
+    )
+
     # MORPHEUS architecture
     parser.add_argument(
         "--morpheus",
@@ -310,6 +345,13 @@ def main() -> None:
         logger.error("--eval_sets includes 'local' but no --local_data_paths provided")
         sys.exit(1)
 
+    if "cf_conflict" in args.eval_sets and not args.counterfact_eval_path:
+        logger.error("--eval_sets includes 'cf_conflict' but no --counterfact_eval_path provided")
+        sys.exit(1)
+    if "cf_control" in args.eval_sets and not args.triviaqa_dcontrol_path:
+        logger.error("--eval_sets includes 'cf_control' but no --triviaqa_dcontrol_path provided")
+        sys.exit(1)
+
     config = EvalConfig(
         model_id=args.model_id,
         checkpoints_dir=args.checkpoints_dir,
@@ -334,6 +376,10 @@ def main() -> None:
         morpheus_similarity_threshold=args.morpheus_similarity_threshold,
         recipe_official_checkpoint=args.recipe_official,
         recipe_official_edits_path=args.recipe_official_edits,
+        counterfact_eval_path=args.counterfact_eval_path,
+        triviaqa_dcontrol_path=args.triviaqa_dcontrol_path,
+        cf_adapter_name=args.cf_adapter_name,
+        cf_split_name=args.cf_split_name,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         do_sample=False,
@@ -372,6 +418,13 @@ def main() -> None:
         logger.info(f"  Mode: Monolithic adapter — {config.monolithic_adapter}")
     else:
         logger.info("  Mode: PnR routing")
+    if config.counterfact_eval_path:
+        logger.info(
+            f"  CounterFact: {config.counterfact_eval_path} "
+            f"(split={config.cf_split_name!r}, cf_adapter={config.cf_adapter_name!r})"
+        )
+    if config.triviaqa_dcontrol_path:
+        logger.info(f"  TriviaQA D_control: {config.triviaqa_dcontrol_path}")
     logger.info(f"  LLM Judge: {config.use_llm_judge}")
     logger.info(f"  Output: {config.output_dir}")
     logger.info("=" * 70)
@@ -410,6 +463,15 @@ def main() -> None:
         cfr = summary.get("cfr")
         if cfr is not None:
             logger.info(f"  CFR:           {cfr}")
+
+        cfr_ctrl = summary.get("cfr_control")
+        if cfr_ctrl is not None:
+            logger.info(f"  CFR (control): {cfr_ctrl}")
+
+        fr = summary.get("dcontrol_forgetting_rate")
+        if fr is not None:
+            acc = summary.get("dcontrol_accuracy", "N/A")
+            logger.info(f"  D_ctrl FR:     {fr}   (acc={acc})")
 
         eff = summary.get("efficiency", {})
         if eff:

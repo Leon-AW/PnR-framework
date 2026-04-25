@@ -214,6 +214,15 @@ class KnowledgeStoreConfig:
     novelty_threshold_shift: float = 0.15
     self_consistency_samples: int = 3
 
+    # Authoritative-override bypass: when zone=hard_override and max_sim
+    # exceeds this threshold, skip LLM generation and return the stored
+    # object_value verbatim. This enforces arch §236 ("factual content
+    # must come from System 5") as a hard architectural hierarchy instead
+    # of a soft prompt-level nudge that Mistral tends to ignore in favor
+    # of parametric belief. Set to a value <= 1.0 to enable; set > 1.0
+    # to disable (falls back to prompt-level injection only).
+    direct_answer_threshold: float = 0.95
+
     conflict_training_fraction: float = 0.1
 
     store_dir: str = "morpheus_state/knowledge_store"

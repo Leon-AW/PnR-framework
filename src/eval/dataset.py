@@ -8,12 +8,16 @@ Provides:
 - EvalSample: Dataclass representing a single evaluation sample
 - build_situated_qa_dataset: Build eval samples from SituatedQA streams
 - build_local_json_dataset: Build eval samples from local JSON files
+- build_counterfact_conflict_dataset: CounterFact D_conflict samples
+- build_triviaqa_control_dataset:    TriviaQA D_control samples
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -195,4 +199,152 @@ def build_local_json_dataset(
         ))
 
     logger.info(f"Built {len(samples)} eval samples from local JSON files")
+    return samples
+
+
+# =============================================================================
+# CounterFact / TriviaQA Builders (D_conflict + D_control)
+# =============================================================================
+
+def build_counterfact_conflict_dataset(
+    counterfact_path: str,
+    n_samples: int,
+    cf_adapter_name: str = "patch_cf_main",
+    cf_split_name: str = "test",
+) -> list[EvalSample]:
+    """Build D_conflict eval samples from ``data/counterfact_eval.json``.
+
+    The adapter is expected to output ``target_new`` (the counterfactual) and
+    the router is expected to pick ``cf_adapter_name``. Per-sample metadata
+    carries ``target_true`` and the neighborhood / paraphrase prompts so that
+    downstream analyses (locality, generality) can reuse the same samples
+    without re-loading the raw JSON.
+
+    Args:
+        counterfact_path: Path to ``counterfact_eval.json`` produced by
+            ``scripts/build_counterfact_data.py``.
+        n_samples: Maximum number of records to load.
+        cf_adapter_name: Adapter the router should route to (default
+            ``patch_cf_main`` — single-adapter exposé config).
+        cf_split_name: Which split of the JSON to use (``train`` or ``test``).
+            Default ``test`` — held-out records the adapter was not trained on.
+
+    Returns:
+        List of EvalSample instances with ``split='cf_conflict'``.
+    """
+    path = Path(counterfact_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"CounterFact eval file not found: {path}. "
+            "Run `scripts/build_counterfact_data.py` first."
+        )
+    with open(path) as f:
+        cf_data = json.load(f)
+
+    records = cf_data.get(cf_split_name)
+    if records is None:
+        raise ValueError(
+            f"CounterFact eval JSON has no split {cf_split_name!r}. "
+            f"Available splits: {[k for k in cf_data if isinstance(cf_data.get(k), list)]}"
+        )
+
+    samples: list[EvalSample] = []
+    for rec in records[:n_samples]:
+        question = rec.get("question")
+        target_new = rec.get("target_new")
+        if not question or not target_new:
+            continue
+        samples.append(EvalSample(
+            question=question.strip(),
+            gold_answers=[target_new.strip()],
+            expected_adapter=cf_adapter_name,
+            split="cf_conflict",
+            metadata={
+                "case_id": rec.get("case_id"),
+                "relation_id": rec.get("relation_id"),
+                "subject": rec.get("subject"),
+                "target_true": rec.get("target_true"),
+                "neighborhood_prompts": rec.get("neighborhood_prompts", []),
+                "paraphrase_prompts": rec.get("paraphrase_prompts", []),
+                "source": "counterfact",
+            },
+        ))
+
+    logger.info(
+        f"Built {len(samples)} D_conflict samples from {path} "
+        f"(split={cf_split_name!r}, cf_adapter={cf_adapter_name!r})"
+    )
+    return samples
+
+
+def build_triviaqa_control_dataset(
+    triviaqa_path: str,
+    n_samples: int,
+) -> list[EvalSample]:
+    """Build D_control eval samples from ``data/triviaqa_dcontrol.json``.
+
+    D_control is pre-filtered so the frozen base model answers each question
+    correctly. Any accuracy drop on this set after adapter integration is
+    interference — the routing fired on a query it should have ignored, or a
+    shared layer leaked the counterfactual into unrelated inputs.
+
+    Samples set ``expected_adapter=None`` so routing accuracy is not scored
+    against a specific adapter — the key signal is EM preservation relative to
+    the no-adapter baseline (computed via CFR).
+
+    Args:
+        triviaqa_path: Path to ``triviaqa_dcontrol.json`` produced by
+            ``scripts/build_triviaqa_dcontrol.py``.
+        n_samples: Maximum number of records to load.
+
+    Returns:
+        List of EvalSample instances with ``split='cf_control'``.
+    """
+    path = Path(triviaqa_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"TriviaQA D_control file not found: {path}. "
+            "Run `scripts/build_triviaqa_dcontrol.py` first."
+        )
+    with open(path) as f:
+        tq_payload = json.load(f)
+
+    # The build script writes an object carrying the short-answer instruction
+    # alongside the records so verification and eval stay byte-identical; fall
+    # back to a bare list for older dumps (no transform applied in that case).
+    if isinstance(tq_payload, dict) and "records" in tq_payload:
+        tq_records = tq_payload["records"]
+        short_instr = tq_payload.get("short_answer_instruction", "")
+    else:
+        tq_records = tq_payload
+        short_instr = ""
+
+    samples: list[EvalSample] = []
+    for rec in tq_records[:n_samples]:
+        question = rec.get("question")
+        aliases = rec.get("all_aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        answer = rec.get("answer") or rec.get("normalized_answer")
+        gold = [a for a in (aliases + ([answer] if answer else [])) if a]
+        gold = list(dict.fromkeys(gold))  # dedupe, preserve order
+
+        if not question or not gold:
+            continue
+        wrapped_q = f"{short_instr}{question.strip()}" if short_instr else question.strip()
+        samples.append(EvalSample(
+            question=wrapped_q,
+            gold_answers=gold,
+            expected_adapter=None,
+            split="cf_control",
+            metadata={
+                "question_id": rec.get("question_id"),
+                "raw_question": question.strip(),
+                "normalized_answer": rec.get("normalized_answer"),
+                "source": "triviaqa",
+                "short_answer_instruction": short_instr,
+            },
+        ))
+
+    logger.info(f"Built {len(samples)} D_control samples from {path}")
     return samples

@@ -26,8 +26,10 @@ from tqdm import tqdm
 from .dataset import (
     EvalSample,
     KNOWN_GEO_ADAPTERS,
+    build_counterfact_conflict_dataset,
     build_local_json_dataset,
     build_situated_qa_dataset,
+    build_triviaqa_control_dataset,
 )
 from .metrics import (
     compute_efficiency,
@@ -35,6 +37,7 @@ from .metrics import (
     compute_routing_accuracy,
     compute_stability_score,
     compute_cfr,
+    compute_dcontrol_forgetting_rate,
     exact_match,
     parse_model_output,
     token_f1,
@@ -43,7 +46,10 @@ from .metrics import (
 logger = logging.getLogger(__name__)
 
 # All valid split names
-VALID_SPLITS: set[str] = {"base", "temporal", "local"} | {f"geo_{c}" for c in KNOWN_GEO_ADAPTERS}
+VALID_SPLITS: set[str] = (
+    {"base", "temporal", "local", "cf_conflict", "cf_control"}
+    | {f"geo_{c}" for c in KNOWN_GEO_ADAPTERS}
+)
 
 
 # =============================================================================
@@ -115,6 +121,11 @@ class EvalConfig:
     recipe_official_edits_path: str | None = None  # JSON file with edits for the official-RECIPE repo
     lora_rag_adapter: str | None = None  # Path to monolithic adapter for LoRA+RAG baseline
     lora_rag_index_path: str | None = None  # JSON file of QA pairs to index for retrieval
+    # CounterFact / TriviaQA (cf_conflict + cf_control splits)
+    counterfact_eval_path: str | None = None  # data/counterfact_eval.json
+    triviaqa_dcontrol_path: str | None = None  # data/triviaqa_dcontrol.json
+    cf_adapter_name: str = "patch_cf_main"  # Adapter the router should pick for D_conflict
+    cf_split_name: str = "test"  # Which split of counterfact_eval.json to use ('train' or 'test')
 
 
 # =============================================================================
@@ -151,6 +162,13 @@ class EvalResult:
     latency_ms: float
     vram_mb: float | None
     judge_score: float | None = None
+    # MORPHEUS-specific diagnostics: populated only for --morpheus runs.
+    # Without these, we cannot tell whether the graduated-factuality
+    # hierarchy is firing or collapsing to the boundary zone on every query.
+    morpheus_zone: str | None = None
+    morpheus_factuality_score: float | None = None
+    morpheus_max_sim: float | None = None
+    morpheus_knowledge_override: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Flatten sample + result fields for JSON output."""
@@ -170,8 +188,59 @@ class EvalResult:
             "latency_ms": self.latency_ms,
             "vram_mb": self.vram_mb,
             "judge_score": self.judge_score,
+            "morpheus_zone": self.morpheus_zone,
+            "morpheus_factuality_score": self.morpheus_factuality_score,
+            "morpheus_max_sim": self.morpheus_max_sim,
+            "morpheus_knowledge_override": self.morpheus_knowledge_override,
             "metadata": self.sample.metadata,
         }
+
+
+# =============================================================================
+# MORPHEUS zone aggregation
+# =============================================================================
+
+def _summarise_morpheus(results: list["EvalResult"]) -> dict[str, Any]:
+    """Aggregate graduated-factuality signals over a set of results.
+
+    Reports zone histogram, hard_override hit-rate, and — critically —
+    conditional EM within each zone. If hard_override fires but its EM
+    is no better than boundary, the override is advisory in name only
+    (the prompt isn't forcing deference) and W2 from the improvement plan
+    becomes the next lever.
+    """
+    zoned = [r for r in results if r.morpheus_zone is not None]
+    n = len(zoned)
+    if n == 0:
+        return {}
+    zones: dict[str, int] = {}
+    em_by_zone: dict[str, list[bool]] = {}
+    sims: list[float] = []
+    for r in zoned:
+        z = r.morpheus_zone
+        zones[z] = zones.get(z, 0) + 1
+        em_by_zone.setdefault(z, []).append(r.is_exact_match)
+        if r.morpheus_max_sim is not None:
+            sims.append(r.morpheus_max_sim)
+    kb_hit = sum(1 for r in zoned if r.morpheus_knowledge_override)
+    summary = {
+        "n": n,
+        "zones": {z: round(c / n, 4) for z, c in zones.items()},
+        "zone_counts": zones,
+        "knowledge_override_rate": round(kb_hit / n, 4),
+        "em_by_zone": {
+            z: round(sum(e) / len(e), 4) for z, e in em_by_zone.items()
+        },
+    }
+    if sims:
+        sims_arr = sorted(sims)
+        summary["max_sim"] = {
+            "mean": round(sum(sims) / len(sims), 4),
+            "p50": round(sims_arr[len(sims_arr) // 2], 4),
+            "p90": round(sims_arr[int(0.9 * (len(sims_arr) - 1))], 4),
+            "max": round(sims_arr[-1], 4),
+        }
+    return summary
 
 
 # =============================================================================
@@ -619,6 +688,18 @@ class EvalRunner:
             routing_result = result.routing_result
             winner_sim = routing_result.winner_similarity if routing_result else None
             has_conflict = routing_result.has_conflict if routing_result else False
+            # Capture graduated-factuality diagnostics so we can aggregate
+            # zone distributions and hard_override hit-rate in the report.
+            fd = getattr(result, "factuality_decision", None)
+            if fd is not None:
+                morpheus_zone = fd.zone
+                morpheus_factuality_score = fd.factuality_score
+                morpheus_max_sim = fd.confidence
+            else:
+                morpheus_zone = None
+                morpheus_factuality_score = None
+                morpheus_max_sim = None
+            morpheus_knowledge_override = bool(getattr(result, "knowledge_override", False))
         elif self.config.recipe_official_checkpoint:
             # RECIPE retrieves continuous prompts — no discrete adapter routing
             routing_correct = True
@@ -649,6 +730,16 @@ class EvalRunner:
             winner_sim = routing_result.winner_similarity if routing_result else None
             has_conflict = routing_result.has_conflict if routing_result else False
 
+        # MORPHEUS diagnostics default to None for non-MORPHEUS runs.
+        morpheus_fields: dict[str, Any] = {}
+        if self.config.morpheus:
+            morpheus_fields = {
+                "morpheus_zone": morpheus_zone,
+                "morpheus_factuality_score": morpheus_factuality_score,
+                "morpheus_max_sim": morpheus_max_sim,
+                "morpheus_knowledge_override": morpheus_knowledge_override,
+            }
+
         return EvalResult(
             sample=sample,
             raw_prediction=result.response,
@@ -661,6 +752,7 @@ class EvalRunner:
             has_conflict=has_conflict,
             latency_ms=latency_ms,
             vram_mb=vram_mb,
+            **morpheus_fields,
         )
 
     # -------------------------------------------------------------------------
@@ -723,9 +815,25 @@ class EvalRunner:
             "efficiency": compute_efficiency(all_results),
         }
 
-        # CFR (requires baseline)
+        # MORPHEUS zone / override aggregation: only populated when at least
+        # one sample carries a factuality decision. Lets us see at a glance
+        # whether the hierarchy fires or collapses to "always boundary".
+        if any(r.morpheus_zone is not None for r in all_results):
+            summary["morpheus"] = _summarise_morpheus(all_results)
+
+        # D_control forgetting rate (no baseline needed — pre-filtered to 100% base acc)
+        fr = compute_dcontrol_forgetting_rate(all_results)
+        if fr is not None:
+            summary["dcontrol_forgetting_rate"] = fr
+            summary["dcontrol_accuracy"] = round(1.0 - fr, 4)
+
+        # CFR (requires baseline, for SituatedQA splits)
         if baseline_results:
             summary["cfr"] = compute_cfr(all_results, baseline_results)
+            if any(r.sample.split == "cf_control" for r in all_results):
+                summary["cfr_control"] = compute_cfr(
+                    all_results, baseline_results, split_filter="cf_control"
+                )
 
         # Per-split breakdown
         splits: dict[str, Any] = {}
@@ -739,9 +847,12 @@ class EvalRunner:
                 "f1": round(sum(r.f1 for r in split_results) / n, 4) if n else 0.0,
                 "routing_accuracy": compute_routing_accuracy(split_results),
             }
+            if any(r.morpheus_zone is not None for r in split_results):
+                splits[split_name]["morpheus"] = _summarise_morpheus(split_results)
 
         # Round optional floats in summary
-        for key in ("routing_accuracy", "esr", "stability_score", "cfr"):
+        for key in ("routing_accuracy", "esr", "stability_score", "cfr", "cfr_control",
+                    "dcontrol_forgetting_rate", "dcontrol_accuracy"):
             if key in summary and summary[key] is not None:
                 summary[key] = round(summary[key], 4)
 
@@ -797,6 +908,11 @@ class EvalRunner:
             logger.info("[3/4] Running evaluation...")
             all_results: list[EvalResult] = []
 
+            # Ensure output_dir exists up front so per-split checkpoints survive
+            # even if a later split crashes or hits a SLURM time limit.
+            output_dir = Path(self.config.output_dir) / run_name
+            output_dir.mkdir(parents=True, exist_ok=True)
+
             for split_name in self.config.eval_sets:
                 logger.info(f"Building dataset for split={split_name!r}...")
 
@@ -804,6 +920,26 @@ class EvalRunner:
                     if split_name == "local":
                         samples = build_local_json_dataset(
                             data_paths=self.config.local_data_paths,
+                            n_samples=self.config.n_samples,
+                        )
+                    elif split_name == "cf_conflict":
+                        if not self.config.counterfact_eval_path:
+                            raise ValueError(
+                                "'cf_conflict' requires --counterfact_eval_path"
+                            )
+                        samples = build_counterfact_conflict_dataset(
+                            counterfact_path=self.config.counterfact_eval_path,
+                            n_samples=self.config.n_samples,
+                            cf_adapter_name=self.config.cf_adapter_name,
+                            cf_split_name=self.config.cf_split_name,
+                        )
+                    elif split_name == "cf_control":
+                        if not self.config.triviaqa_dcontrol_path:
+                            raise ValueError(
+                                "'cf_control' requires --triviaqa_dcontrol_path"
+                            )
+                        samples = build_triviaqa_control_dataset(
+                            triviaqa_path=self.config.triviaqa_dcontrol_path,
                             n_samples=self.config.n_samples,
                         )
                     else:
@@ -822,6 +958,18 @@ class EvalRunner:
                 split_results = self._run_split(samples, pipeline, split_name)
                 all_results.extend(split_results)
 
+                # Per-split checkpoint: survives SLURM timeouts and lets
+                # single-split jobs be merged later via scripts/merge_eval_splits.py.
+                split_path = output_dir / f"results_{split_name}.json"
+                with open(split_path, "w") as f:
+                    json.dump(
+                        [r.to_dict() for r in split_results],
+                        f,
+                        indent=2,
+                        default=str,
+                    )
+                logger.info(f"  checkpoint: {split_path} ({len(split_results)} samples)")
+
             if not all_results:
                 logger.error("No evaluation results produced!")
                 return {"summary": {}, "by_split": {}, "config": dataclasses.asdict(self.config)}
@@ -839,10 +987,8 @@ class EvalRunner:
             summary_metrics = {k: v for k, v in report["summary"].items() if isinstance(v, (int, float))}
             tracker.log_metrics(summary_metrics)
 
-            # Save results to disk
-            output_dir = Path(self.config.output_dir) / run_name
-            output_dir.mkdir(parents=True, exist_ok=True)
-
+            # Save results to disk (output_dir already created above for
+            # per-split checkpoints).
             results_path = output_dir / "results.json"
             with open(results_path, "w") as f:
                 json.dump([r.to_dict() for r in all_results], f, indent=2, default=str)

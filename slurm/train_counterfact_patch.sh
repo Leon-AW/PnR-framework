@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:a10080gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --time=14:00:00
 #SBATCH --output=logs/train_cf_patch_%j.out
 #SBATCH --error=logs/train_cf_patch_%j.err
 #SBATCH --exclude=gruenau10
@@ -47,15 +47,15 @@ python train/train_counterfact_patch.py \
     --data_path data/counterfact_train.jsonl \
     --adapter_name patch_cf_main \
     --output_dir checkpoints/patch_cf_main \
-    --max_steps 2000 \
-    --batch_size 1 \
-    --gradient_accumulation 16 \
+    --max_steps 8000 \
+    --batch_size 2 \
+    --gradient_accumulation 8 \
     --learning_rate 2e-4 \
-    --lora_r 16 \
-    --lora_alpha 32 \
-    --max_seq_length 256 \
-    --save_steps 200 \
-    --logging_steps 25
+    --lora_r 32 \
+    --lora_alpha 64 \
+    --max_seq_length 128 \
+    --save_steps 1000 \
+    --logging_steps 50
 
 echo "======================================================================"
 echo "Finished : $(date)"
