@@ -2,12 +2,12 @@
 #SBATCH --job-name=train_cf_patch
 #SBATCH --partition=longgpu
 #SBATCH --gres=gpu:a10080gb:1
+#SBATCH --nodelist=gruenau10
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=14:00:00
 #SBATCH --output=logs/train_cf_patch_%j.out
 #SBATCH --error=logs/train_cf_patch_%j.err
-#SBATCH --exclude=gruenau10
 
 # ==============================================================================
 # Train CounterFact Patch Adapter

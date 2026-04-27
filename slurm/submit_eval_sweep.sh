@@ -2,7 +2,10 @@
 # ==============================================================================
 # Submit SituatedQA Evaluation Sweep
 #
-# Submits 7 baselines as independent parallel SLURM jobs.
+# Submits 7 baselines as a sequential SLURM chain (--dependency=afterany).
+# Sequential, not parallel: all jobs target gruenau10 and we don't want
+# multiple jobs sharing a single GPU via MPS (caused OOMs in earlier sweeps).
+#
 # RECIPE Official is included but commented out — submit once training
 # advances to ~epoch 200 (check: ls external/RECIPE/train_records/.../).
 #
@@ -35,7 +38,7 @@ echo "[1/7] frozen_base        → job ${JID1}"
 # ------------------------------------------------------------------------------
 # 2. Monolithic LoRA — single adapter, no routing
 # ------------------------------------------------------------------------------
-JID2=$(sbatch --job-name=eval_monolithic "${SCRIPT}" \
+JID2=$(sbatch --dependency=afterany:${JID1} --job-name=eval_monolithic "${SCRIPT}" \
     --monolithic "${CKPT}/monolithic_v1" \
     --run_name monolithic \
     | awk '{print $NF}')
@@ -44,7 +47,7 @@ echo "[2/7] monolithic         → job ${JID2}"
 # ------------------------------------------------------------------------------
 # 3. LoRA + RAG — monolithic adapter + QA-pair retrieval at inference time
 # ------------------------------------------------------------------------------
-JID3=$(sbatch --job-name=eval_lora_rag "${SCRIPT}" \
+JID3=$(sbatch --dependency=afterany:${JID2} --job-name=eval_lora_rag "${SCRIPT}" \
     --lora_rag "${CKPT}/monolithic_v1" \
     --lora_rag_index "$(pwd)/data/edit_pairs.json" \
     --run_name lora_rag \
@@ -54,7 +57,7 @@ echo "[3/7] lora_rag           → job ${JID3}"
 # ------------------------------------------------------------------------------
 # 4. PnR routing — Time-Aware Centroid Router + Source-Replay
 # ------------------------------------------------------------------------------
-JID4=$(sbatch --job-name=eval_pnr "${SCRIPT}" \
+JID4=$(sbatch --dependency=afterany:${JID3} --job-name=eval_pnr "${SCRIPT}" \
     --router_state "${ROUTER_STATE}" \
     --run_name pnr \
     | awk '{print $NF}')
@@ -63,7 +66,7 @@ echo "[4/7] pnr                → job ${JID4}"
 # ------------------------------------------------------------------------------
 # 5. X-LoRA — soft gating baseline
 # ------------------------------------------------------------------------------
-JID5=$(sbatch --job-name=eval_xlora "${SCRIPT}" \
+JID5=$(sbatch --dependency=afterany:${JID4} --job-name=eval_xlora "${SCRIPT}" \
     --xlora "${CKPT}/xlora_baseline" \
     --run_name xlora \
     | awk '{print $NF}')
@@ -72,7 +75,7 @@ echo "[5/7] xlora              → job ${JID5}"
 # ------------------------------------------------------------------------------
 # 6. Parallel Orchestrator — multi-adapter ensemble + synthesis
 # ------------------------------------------------------------------------------
-JID6=$(sbatch --job-name=eval_parallel "${SCRIPT}" \
+JID6=$(sbatch --dependency=afterany:${JID5} --job-name=eval_parallel "${SCRIPT}" \
     --parallel \
     --router_state "${ROUTER_STATE}" \
     --run_name parallel_orchestrator \
@@ -82,7 +85,7 @@ echo "[6/7] parallel_orch      → job ${JID6}"
 # ------------------------------------------------------------------------------
 # 7. MORPHEUS — multi-system architecture (bonus, not in exposé)
 # ------------------------------------------------------------------------------
-JID7=$(sbatch --job-name=eval_morpheus "${SCRIPT}" \
+JID7=$(sbatch --dependency=afterany:${JID6} --job-name=eval_morpheus "${SCRIPT}" \
     --morpheus \
     --router_state "${ROUTER_STATE}" \
     --run_name morpheus \

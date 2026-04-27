@@ -2,12 +2,12 @@
 #SBATCH --job-name=triviaqa_dcontrol
 #SBATCH --partition=longgpu
 #SBATCH --gres=gpu:a10080gb:1
+#SBATCH --nodelist=gruenau10
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00
 #SBATCH --output=logs/triviaqa_dcontrol_%j.out
 #SBATCH --error=logs/triviaqa_dcontrol_%j.err
-#SBATCH --exclude=gruenau10
 
 # ==============================================================================
 # Build TriviaQA D_control Dataset

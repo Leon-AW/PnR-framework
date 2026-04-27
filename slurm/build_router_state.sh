@@ -5,9 +5,9 @@
 #SBATCH --time=01:00:00
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
-#SBATCH --exclude=gruenau10
+#SBATCH --partition=longgpu
+#SBATCH --gres=gpu:a10080gb:1
+#SBATCH --nodelist=gruenau10
 
 set -e
 cd /vol/fob-vol1/mi23/wagnerql/PnR-framework

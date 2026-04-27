@@ -113,7 +113,9 @@ class MorpheusPromptBuilder:
         system_prompt: str | None = None,
     ) -> None:
         self.tokenizer = tokenizer
-        self.system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
+        # Default to no system message; LoRA adapters and the D_control
+        # pre-filter were both built with bare user/assistant pairs.
+        self.system_prompt = system_prompt
 
     def build(
         self,
@@ -132,11 +134,14 @@ class MorpheusPromptBuilder:
         """
         messages = []
 
-        system_content = self.system_prompt
+        system_content = self.system_prompt or ""
         if uncertainty_signal:
-            system_content += f"\n\nNote: {uncertainty_signal}"
+            system_content = (
+                f"{system_content}\n\nNote: {uncertainty_signal}".strip()
+            )
 
-        messages.append({"role": "system", "content": system_content})
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
 
         user_content = query
         context_parts = []

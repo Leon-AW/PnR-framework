@@ -2,6 +2,7 @@
 #SBATCH --job-name=debug_recipe
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a10080gb:1
+#SBATCH --nodelist=gruenau10
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=00:30:00

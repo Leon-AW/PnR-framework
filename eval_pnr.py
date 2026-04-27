@@ -268,6 +268,20 @@ def parse_args() -> argparse.Namespace:
             "and suppresses most valid routes."
         ),
     )
+    parser.add_argument(
+        "--morpheus_direct_answer_threshold",
+        type=float,
+        default=0.95,
+        help=(
+            "Authoritative-override bypass threshold for the MORPHEUS "
+            "Knowledge Store. When confidence >= this value AND zone is "
+            "hard_override, the LLM is skipped and the stored object_value "
+            "is returned verbatim. Set > 1.0 to disable the bypass and "
+            "force adapter-based generation (recommended for Patch-and-Route "
+            "evaluation, since the bypass reduces MORPHEUS to retrieval "
+            "and decouples the result from the activated specialist)."
+        ),
+    )
 
     # Generation configuration
     parser.add_argument(
@@ -374,6 +388,7 @@ def main() -> None:
         morpheus=args.morpheus,
         morpheus_state_dir=args.morpheus_state_dir,
         morpheus_similarity_threshold=args.morpheus_similarity_threshold,
+        morpheus_direct_answer_threshold=args.morpheus_direct_answer_threshold,
         recipe_official_checkpoint=args.recipe_official,
         recipe_official_edits_path=args.recipe_official_edits,
         counterfact_eval_path=args.counterfact_eval_path,

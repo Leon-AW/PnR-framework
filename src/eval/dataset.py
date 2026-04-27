@@ -16,11 +16,21 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+D_EVAL_SAMPLING_SEED: int = 42
+"""Fixed seed for D_conflict / D_control sampling.
+
+Held constant across all systems in the D_eval sweep so that every method is
+evaluated on the *same* 1{,}000 records. Cross-system comparisons of ESR / FR
+would otherwise be confounded by sample variation. See exposé §Stability Probe.
+"""
 
 # Known geographic adapters (matches checkpoints/ directory)
 KNOWN_GEO_ADAPTERS: frozenset[str] = frozenset({
@@ -211,6 +221,7 @@ def build_counterfact_conflict_dataset(
     n_samples: int,
     cf_adapter_name: str = "patch_cf_main",
     cf_split_name: str = "test",
+    random_seed: int = D_EVAL_SAMPLING_SEED,
 ) -> list[EvalSample]:
     """Build D_conflict eval samples from ``data/counterfact_eval.json``.
 
@@ -248,8 +259,17 @@ def build_counterfact_conflict_dataset(
             f"Available splits: {[k for k in cf_data if isinstance(cf_data.get(k), list)]}"
         )
 
+    if n_samples < len(records):
+        rng = random.Random(random_seed)
+        selected_indices = sorted(rng.sample(range(len(records)), n_samples))
+        records = [records[i] for i in selected_indices]
+        logger.info(
+            f"D_conflict: uniform-random sample of {n_samples} from "
+            f"{len(cf_data.get(cf_split_name))} records (seed={random_seed})"
+        )
+
     samples: list[EvalSample] = []
-    for rec in records[:n_samples]:
+    for rec in records:
         question = rec.get("question")
         target_new = rec.get("target_new")
         if not question or not target_new:
@@ -280,6 +300,7 @@ def build_counterfact_conflict_dataset(
 def build_triviaqa_control_dataset(
     triviaqa_path: str,
     n_samples: int,
+    random_seed: int = D_EVAL_SAMPLING_SEED,
 ) -> list[EvalSample]:
     """Build D_control eval samples from ``data/triviaqa_dcontrol.json``.
 
@@ -319,8 +340,18 @@ def build_triviaqa_control_dataset(
         tq_records = tq_payload
         short_instr = ""
 
+    if n_samples < len(tq_records):
+        rng = random.Random(random_seed)
+        selected_indices = sorted(rng.sample(range(len(tq_records)), n_samples))
+        full_pool_size = len(tq_records)
+        tq_records = [tq_records[i] for i in selected_indices]
+        logger.info(
+            f"D_control: uniform-random sample of {n_samples} from "
+            f"{full_pool_size} records (seed={random_seed})"
+        )
+
     samples: list[EvalSample] = []
-    for rec in tq_records[:n_samples]:
+    for rec in tq_records:
         question = rec.get("question")
         aliases = rec.get("all_aliases") or []
         if isinstance(aliases, str):

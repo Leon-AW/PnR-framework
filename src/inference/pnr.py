@@ -134,7 +134,11 @@ Be concise and accurate."""
             system_prompt: Custom system prompt (uses default if None).
         """
         self.tokenizer = tokenizer
-        self.system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
+        # Default to no system message: the D_control pre-filter
+        # (scripts/build_triviaqa_dcontrol.py) and all LoRA adapter training
+        # used bare user/assistant pairs, so injecting a system prompt at eval
+        # time changes the format and tanks frozen-base accuracy.
+        self.system_prompt = system_prompt
     
     def build(
         self,

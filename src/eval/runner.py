@@ -113,6 +113,11 @@ class EvalConfig:
     # `similarity_threshold=0.65` there would reject most valid routes. The
     # value below is the native default of `PrototypeRouterConfig`.
     morpheus_similarity_threshold: float = 0.55
+    # Authoritative-override bypass threshold (KnowledgeStoreConfig.direct_answer_threshold).
+    # Default 0.95 keeps current behaviour. Set > 1.0 to disable bypass and
+    # force the activated specialist (LoRA adapter) to generate every answer
+    # — the Patch-and-Route-conformant evaluation path.
+    morpheus_direct_answer_threshold: float = 0.95
     parallel_orchestrator: bool = False  # Use Parallel-Orchestrator architecture
     parallel_max_adapters: int = 5  # Max adapters for parallel execution
     parallel_query_planner: str = "heuristic"  # "heuristic" or "llm"
@@ -394,6 +399,9 @@ class EvalRunner:
         )
         if self.config.morpheus_state_dir:
             morpheus_config.state_dir = self.config.morpheus_state_dir
+        morpheus_config.knowledge_store.direct_answer_threshold = (
+            self.config.morpheus_direct_answer_threshold
+        )
 
         gen_config = MorpheusGenerationConfig(
             max_new_tokens=self.config.max_new_tokens,
@@ -771,13 +779,22 @@ class EvalRunner:
             List of EvalResult objects.
         """
         results: list[EvalResult] = []
+        consecutive_failures = 0
+        FAIL_FAST_THRESHOLD = 10
 
         for sample in tqdm(samples, desc=f"Eval [{split_name}]", unit="sample"):
             try:
                 result = self._run_single(sample, pipeline)
                 results.append(result)
+                consecutive_failures = 0
             except Exception as e:
+                consecutive_failures += 1
                 logger.warning(f"Failed on sample (split={split_name}): {e}")
+                if consecutive_failures >= FAIL_FAST_THRESHOLD and not results:
+                    raise RuntimeError(
+                        f"Aborting: first {FAIL_FAST_THRESHOLD} samples in split={split_name!r} "
+                        f"all failed. Last error: {e}"
+                    ) from e
                 continue
 
         return results

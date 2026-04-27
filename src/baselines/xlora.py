@@ -216,12 +216,19 @@ class XLoRAInference:
         # answer is usually in the first few tokens but gets buried, killing
         # token-level F1. Cap at 30, then truncate at the first sentence/line.
         max_new = min(self.max_new_tokens, 30)
+        # no_repeat_ngram_size=3 breaks the soft-blend repetition loop
+        # ("Lionel Lionel Lionel ..."): with 14 adapters at near-uniform
+        # softmax weights the LM head's top-1 token is often correct on the
+        # first step but the blended hidden state then re-attracts the same
+        # token, killing both EM and F1. repetition_penalty=1.3 alone is not
+        # enough to break this; forbidding any 3-gram repeat is.
         gen_kwargs: dict[str, Any] = {
             "max_new_tokens": max_new,
             "do_sample": self.do_sample,
             "pad_token_id": self._tokenizer.pad_token_id,
             "eos_token_id": self._tokenizer.eos_token_id,
             "repetition_penalty": 1.3,
+            "no_repeat_ngram_size": 3,
         }
         if self.do_sample:
             gen_kwargs["temperature"] = self.temperature
