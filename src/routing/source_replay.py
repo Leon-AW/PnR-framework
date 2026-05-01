@@ -98,16 +98,23 @@ class AdapterIndex:
         
         self.adapter_id = adapter_id
         self.embedding_dim = embedding_dim
-        self.use_gpu = use_gpu
-        
+        # `use_gpu` ends up reflecting whether GPU FAISS *actually* succeeded,
+        # not what the caller requested. The save path keys off this flag
+        # to decide whether `faiss.index_gpu_to_cpu` is needed; if we left
+        # it at the requested value when running against `faiss-cpu`
+        # (HAS_FAISS_GPU=False), `save()` would crash with
+        # `module 'faiss' has no attribute 'index_gpu_to_cpu'`.
+        self.use_gpu = False
+
         # Create FAISS index (Inner Product for cosine similarity on normalized vectors)
         self.index = faiss.IndexFlatIP(embedding_dim)
-        
+
         # GPU acceleration if available (requires faiss-gpu, not faiss-cpu)
         if use_gpu and HAS_FAISS_GPU:
             try:
                 res = faiss.StandardGpuResources()
                 self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
+                self.use_gpu = True
                 logger.info(f"Using GPU-accelerated FAISS for {adapter_id}")
             except Exception as e:
                 logger.debug(f"GPU FAISS initialization failed: {e}")  # Debug level, not warning
@@ -258,12 +265,17 @@ class AdapterIndex:
         
         # Load FAISS index
         instance.index = faiss.read_index(str(index_path))
-        
-        # GPU acceleration if available (requires faiss-gpu)
+
+        # GPU acceleration if available (requires faiss-gpu). Mirror the
+        # __init__ contract — `instance.use_gpu` reflects what actually
+        # succeeded so a later `.save()` doesn't try `faiss.index_gpu_to_cpu`
+        # under faiss-cpu.
+        instance.use_gpu = False
         if use_gpu and HAS_FAISS_GPU:
             try:
                 res = faiss.StandardGpuResources()
                 instance.index = faiss.index_cpu_to_gpu(res, 0, instance.index)
+                instance.use_gpu = True
             except Exception:
                 pass
         

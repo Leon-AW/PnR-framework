@@ -143,9 +143,15 @@ class ExternalJudge:
             quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
         logger.info("Loading judge tokenizer: %s", self.model_id)
+        # Gemma-4 ships `extra_special_tokens` as a list (e.g. ["<|video|>"]),
+        # but transformers 4.57.x expects a dict and crashes in
+        # _set_model_specific_special_tokens with `'list' object has no
+        # attribute 'keys'`. Passing {} bypasses the parent-class init path;
+        # the dropped token is multimodal and unused by a text-only judge.
         self._tokenizer = AutoTokenizer.from_pretrained(
             self.model_id,
             trust_remote_code=True,
+            extra_special_tokens={},
         )
         if self._tokenizer.pad_token_id is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
@@ -188,29 +194,32 @@ class ExternalJudge:
         prompt_str = self._build_prompt(question, gold, prediction, dataset_kind)
         chat = [{"role": "user", "content": prompt_str}]
 
-        prompt_ids = self._tokenizer.apply_chat_template(
+        encoded = self._tokenizer.apply_chat_template(
             chat,
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
         )
-        if self.device == "cuda":
-            prompt_ids = prompt_ids.to(self._model.device)
+        # transformers ≥5.x returns a BatchEncoding; ≤4.x returns a bare tensor.
+        if hasattr(encoded, "input_ids"):
+            input_ids = encoded.input_ids
         else:
-            prompt_ids = prompt_ids.to("cpu")
+            input_ids = encoded
+
+        target_device = self._model.device if self.device == "cuda" else "cpu"
+        input_ids = input_ids.to(target_device)
 
         import torch
 
         with torch.no_grad():
             output = self._model.generate(
-                prompt_ids,
+                input_ids=input_ids,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=False,
-                temperature=0.0,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
 
-        response_ids = output[0][prompt_ids.shape[1] :]
+        response_ids = output[0][input_ids.shape[1] :]
         raw = self._tokenizer.decode(
             response_ids,
             skip_special_tokens=True,

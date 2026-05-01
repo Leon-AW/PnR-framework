@@ -65,9 +65,40 @@ def parse_args() -> argparse.Namespace:
                         help="Max tokens to generate per answer")
     parser.add_argument("--model_id", default="mistralai/Mistral-7B-Instruct-v0.3",
                         help="Base model HuggingFace ID")
+    parser.add_argument(
+        "--exclude_path",
+        default=None,
+        help="Path to an existing D_control-style JSON whose `question_id`s "
+             "must be excluded from the new build. Use this when generating "
+             "the disjoint D_calibration slice consumed by "
+             "scripts/build_router_state.py — calibrating against questions "
+             "that also appear in the eval-time D_control probe would be "
+             "test-set leakage and invalidate the 'any drop = "
+             "routing-induced forgetting' guarantee from the exposé.",
+    )
+    parser.add_argument(
+        "--start_offset",
+        type=int,
+        default=0,
+        help="Skip the first N TriviaQA train examples before starting "
+             "verification. Combined with --exclude_path this is purely a "
+             "speed optimisation when building the calibration slice — set "
+             "it slightly past the index range covered by the original "
+             "D_control build.",
+    )
     parser.add_argument("--log_level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args()
+
+
+def load_excluded_ids(path: Path) -> set[str]:
+    """Load `question_id`s from a previous D_control file to exclude them."""
+    if not path.exists():
+        return set()
+    with path.open() as f:
+        data = json.load(f)
+    records = data.get("records", data) if isinstance(data, dict) else data
+    return {str(r["question_id"]) for r in records if r.get("question_id")}
 
 
 # Prepended verbatim to every TriviaQA question so the frozen base model is
@@ -106,17 +137,26 @@ def format_prompt(question: str, tokenizer) -> str:
 
 
 def extract_answer(generated_text: str, prompt: str) -> str:
-    """Extract the model's answer from generated text by removing the prompt."""
+    """Extract the model's answer — mirrors parse_model_output in src/eval/metrics.py.
+
+    Uses the same </think> stripping and boundary set so that pre-filter
+    selection and eval scoring operate on byte-identical extracted strings.
+    """
+    import re as _re
     if generated_text.startswith(prompt):
         answer = generated_text[len(prompt):]
     else:
         answer = generated_text
 
-    # Take only the first line / sentence
-    answer = answer.strip()
-    for sep in ["\n", ".", "!", "?"]:
-        if sep in answer:
-            answer = answer[:answer.index(sep)].strip()
+    # Strip optional chain-of-thought block (mirrors parse_model_output)
+    parts = _re.split(r"</think>", answer, maxsplit=1)
+    answer = parts[-1].strip()
+
+    # Truncate at first sentence-ending boundary
+    for sep in ("\n", ".", "!", "?"):
+        idx = answer.find(sep)
+        if idx >= 0:
+            answer = answer[:idx]
             break
 
     return answer.strip()
@@ -139,14 +179,21 @@ def main() -> None:
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    excluded_ids: set[str] = set()
+    if args.exclude_path:
+        excluded_ids = load_excluded_ids(Path(args.exclude_path))
+
     logger.info("=" * 70)
     logger.info("BUILD TRIVIAQA D_CONTROL")
     logger.info("=" * 70)
-    logger.info(f"Target:        {args.target:,} verified correct pairs")
-    logger.info(f"Max process:   {args.max_process:,} questions")
-    logger.info(f"Batch size:    {args.batch_size}")
-    logger.info(f"Max new tokens:{args.max_new_tokens}")
-    logger.info(f"Output:        {output_path}")
+    logger.info(f"Target:         {args.target:,} verified correct pairs")
+    logger.info(f"Max process:    {args.max_process:,} questions")
+    logger.info(f"Batch size:     {args.batch_size}")
+    logger.info(f"Max new tokens: {args.max_new_tokens}")
+    logger.info(f"Output:         {output_path}")
+    logger.info(f"Exclude path:   {args.exclude_path or '<none>'} "
+                f"({len(excluded_ids)} ids)")
+    logger.info(f"Start offset:   {args.start_offset:,}")
     logger.info("=" * 70)
 
     # ------------------------------------------------------------------
@@ -190,10 +237,19 @@ def main() -> None:
     t_start = time.time()
     log_interval = 500
 
-    for batch_start in range(0, min(len(tqa), args.max_process), args.batch_size):
+    range_start = max(0, args.start_offset)
+    range_end = min(len(tqa), range_start + args.max_process)
+    if range_end <= range_start:
+        logger.error(
+            f"Empty processing range [{range_start}, {range_end}). "
+            f"Check --start_offset / --max_process."
+        )
+        return
+
+    for batch_start in range(range_start, range_end, args.batch_size):
         batch = tqa.select(range(
             batch_start,
-            min(batch_start + args.batch_size, len(tqa), args.max_process)
+            min(batch_start + args.batch_size, range_end),
         ))
 
         questions = batch["question"]
@@ -241,6 +297,9 @@ def main() -> None:
                 aliases = [answer_dict.get("normalized_value", "")]
 
             processed += 1
+
+            if excluded_ids and str(qid) in excluded_ids:
+                continue
 
             if is_correct(model_answer, aliases):
                 correct += 1

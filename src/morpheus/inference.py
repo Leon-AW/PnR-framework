@@ -46,15 +46,27 @@ from .router import PrototypeRouter
 logger = logging.getLogger(__name__)
 
 
+from src.eval.metrics import DEFAULT_SHORT_ANSWER_BOUNDARIES
+
+
 @dataclass
 class MorpheusGenerationConfig:
-    """Generation hyperparameters for MORPHEUS inference."""
+    """Generation hyperparameters for MORPHEUS inference.
+
+    Mirrors ``src.inference.GenerationConfig`` so the unified
+    ``generate_text`` helper can consume both interchangeably. In
+    particular, ``stop_sequences`` defaults to the same factoid
+    sentence-boundary set used by PnR — keeping MORPHEUS comparable
+    on every dataset split (cf_conflict, cf_control, SituatedQA, ...).
+    """
     max_new_tokens: int = 256
     temperature: float = 0.7
     top_p: float = 0.9
     top_k: int = 50
     do_sample: bool = True
     repetition_penalty: float = 1.1
+    num_beams: int = 1
+    stop_sequences: tuple[str, ...] = DEFAULT_SHORT_ANSWER_BOUNDARIES
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +76,7 @@ class MorpheusGenerationConfig:
             "top_k": self.top_k if self.do_sample else None,
             "do_sample": self.do_sample,
             "repetition_penalty": self.repetition_penalty,
+            "num_beams": self.num_beams,
         }
 
 
@@ -223,6 +236,28 @@ class MorpheusInference:
         self._current_adapter: str | None = None
         self._embedding_fn = embedding_fn
 
+        # Load factuality classifier if a checkpoint path is configured.
+        # Gracefully degrades to max_sim fallback if loading fails.
+        self._factuality_classifier = None
+        if self.config.knowledge_store.classifier_path:
+            try:
+                from .factuality_classifier import FactualityClassifier
+                self._factuality_classifier = FactualityClassifier.load(
+                    self.config.knowledge_store.classifier_path,
+                    device="auto",
+                )
+                logger.info(
+                    "Factuality classifier loaded from %s",
+                    self.config.knowledge_store.classifier_path,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not load factuality classifier from %s: %s "
+                    "— falling back to max_sim",
+                    self.config.knowledge_store.classifier_path,
+                    exc,
+                )
+
         # If no router provided, create one
         if self._router is None:
             self._router = PrototypeRouter(
@@ -334,13 +369,17 @@ class MorpheusInference:
         if self._embedding_fn and not skip_routing:
             query_emb = self._embedding_fn(query)
 
-            # factuality_score=None → KnowledgeStore derives it from retrieval
-            # max_sim (see knowledge_store.assess_factuality). This activates
-            # the hard_override path when the KB has a tight semantic match,
-            # which is the arch-doc §249 behaviour minus a trained classifier.
+            # When a trained factuality classifier is available, use its score
+            # to drive zone classification (arch §249). Falls back to max_sim
+            # (factuality_score=None) when no classifier is loaded.
+            factuality_score = (
+                self._factuality_classifier.predict_single(query)
+                if self._factuality_classifier is not None
+                else None
+            )
             factuality_decision = self._knowledge_store.assess_factuality(
                 query_embedding=query_emb,
-                factuality_score=None,
+                factuality_score=factuality_score,
                 novelty_level=novelty_level,
             )
 
@@ -417,30 +456,126 @@ class MorpheusInference:
         prompt: str,
         config: MorpheusGenerationConfig,
     ) -> str:
-        """Generate text from the current model state."""
+        """Generate text from the current model state.
+
+        Delegates to the shared ``generate_text`` helper from
+        ``src.inference`` so MORPHEUS, PnR and the Parallel Orchestrator
+        all use *exactly* the same generation path — including the
+        sentence-boundary stop-sequence behaviour driven by
+        ``config.stop_sequences``. Without this delegation, divergent
+        ``model.generate`` call sites silently desynchronise factoid EM
+        across systems, which is the parsing bug we are explicitly trying
+        to eliminate.
+        """
+        from src.inference import generate_text, GenerationConfig
+
+        # Translate MORPHEUS' generation config into the shared dataclass
+        # to avoid duplicating the StoppingCriteria plumbing.
+        shared_cfg = GenerationConfig(
+            max_new_tokens=config.max_new_tokens,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            top_k=config.top_k,
+            do_sample=config.do_sample,
+            repetition_penalty=config.repetition_penalty,
+            num_beams=getattr(config, "num_beams", 1),
+            stop_sequences=getattr(
+                config, "stop_sequences", DEFAULT_SHORT_ANSWER_BOUNDARIES
+            ),
+        )
+
         model = self._core.model
         tokenizer = self._core.tokenizer
-
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=4096,
+        return generate_text(
+            model=model,
+            tokenizer=tokenizer,
+            prompt=prompt,
+            config=shared_cfg,
+            use_gpu=torch.cuda.is_available(),
         )
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                **config.to_dict(),
+    # ------------------------------------------------------------------
+    # Log-probability scoring (ROME / MEMIT-style ESR)
+    # ------------------------------------------------------------------
+
+    def score_targets(
+        self,
+        query: str,
+        targets: list[str],
+        skip_routing: bool = False,
+        force_adapter: str | None = None,
+    ) -> dict[str, float]:
+        """Compute log P(target | prompt) on the post-routing MORPHEUS state.
+
+        Mirrors ``PatchAndRouteInference.score_targets`` so the runner can
+        compute log-prob ESR uniformly across every architecture in the
+        framework. Routes the query, loads the winning expert, builds the
+        same factuality-aware prompt, and then teacher-forces each target
+        through the loaded model.
+
+        Notes on the authoritative-override path: when the knowledge store
+        decides to *bypass* the LLM (``hard_override`` above
+        ``direct_answer_threshold``), generation never happens — but
+        log-prob scoring still runs because the target probability under
+        the model's parametric distribution is the metric we care about.
+        We deliberately do *not* short-circuit to the stored ``object_value``
+        here so the log-prob view stays comparable across systems.
+        """
+        from src.inference import score_target_logprob
+
+        self._ensure_core_loaded()
+
+        adapter_loaded = None
+        knowledge_context = ""
+        uncertainty_signal = ""
+
+        # Route + (optionally) consult the knowledge store, identical to
+        # the path taken by `generate`.
+        if not skip_routing and not force_adapter:
+            routing_result = self._router.route(query)
+            if routing_result.winner_path:
+                self._load_expert_adapter(routing_result.winner_path)
+                adapter_loaded = routing_result.winner_adapter
+
+            if self._embedding_fn:
+                query_emb = self._embedding_fn(query)
+                factuality_score = (
+                    self._factuality_classifier.predict_single(query)
+                    if self._factuality_classifier is not None
+                    else None
+                )
+                fd = self._knowledge_store.assess_factuality(
+                    query_embedding=query_emb,
+                    factuality_score=factuality_score,
+                    novelty_level=self._meta.get_novelty_level(),
+                )
+                if fd.zone in ("hard_override", "boundary"):
+                    knowledge_context = self._knowledge_store.build_override_context(
+                        fd.system5_records,
+                    )
+                    if fd.zone == "boundary":
+                        uncertainty_signal = fd.uncertainty_signal
+        elif force_adapter:
+            self._load_expert_adapter(force_adapter)
+
+        prompt = self._prompt_builder.build(
+            query=query,
+            knowledge_context=knowledge_context,
+            uncertainty_signal=uncertainty_signal,
+        )
+
+        model = self._core.model
+        tokenizer = self._core.tokenizer
+        scores: dict[str, float] = {}
+        for target in targets:
+            scores[target] = score_target_logprob(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                target=target,
+                use_gpu=torch.cuda.is_available(),
             )
-
-        prompt_length = inputs["input_ids"].shape[1]
-        response_tokens = outputs[0][prompt_length:]
-        response = tokenizer.decode(response_tokens, skip_special_tokens=True)
-        return response.strip()
+        return scores
 
     # ------------------------------------------------------------------
     # System state construction

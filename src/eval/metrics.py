@@ -11,11 +11,22 @@ Metrics implemented:
 - normalize_answer / parse_model_output: text preprocessing
 - exact_match / token_f1: answer quality (SQuAD-style)
 - compute_esr: Effective Success Rate (routing correct AND exact match)
+- compute_logprob_esr: ROME/MEMIT-style ESR (prob(target_new) > prob(target_true))
 - compute_routing_accuracy: fraction routed to expected adapter
 - compute_stability_score: exact-match on "base" split (forgetting detection)
 - compute_cfr: Catastrophic Forgetting Rate (PnR vs baseline)
 - compute_dcontrol_forgetting_rate: forgetting on D_control (TriviaQA pre-filtered to 100% base accuracy)
 - compute_efficiency: latency and VRAM statistics
+
+Convention — short-answer normalisation
+---------------------------------------
+Every gold answer in the suite (SituatedQA factoids, CounterFact target_new,
+TriviaQA aliases) is a short phrase. Both ``parse_model_output`` and the
+generation-time stop sequences (``DEFAULT_STOP_SEQUENCES``) therefore truncate
+at the first sentence-ending boundary so the model's verbose continuations
+("Singapore is a city-state in...") collapse to the EM-scorable head
+("Singapore"). Apply uniformly across all dataset splits — divergent
+extraction across splits or systems silently confounds ESR / FR comparisons.
 """
 
 from __future__ import annotations
@@ -27,6 +38,25 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .runner import EvalResult
+
+
+# Sentence-boundary characters that mark the end of a short factoid answer.
+# Kept in priority order: a newline always wins (e.g. instruct models that
+# bullet-list explanations after the answer), then sentence punctuation.
+DEFAULT_SHORT_ANSWER_BOUNDARIES: tuple[str, ...] = ("\n", ".", "!", "?")
+"""Boundaries used to truncate verbose model outputs to the EM head.
+
+Mirrors ``scripts/build_triviaqa_dcontrol.py::extract_answer`` so the eval
+runner sees the *same* short answer the D_control pre-filter saw — without
+this the frozen-base FR is non-zero by construction (a verbose continuation
+flips EM even when the same model was scored as "correct" during
+pre-filtering).
+
+Also used as the default ``stop_sequences`` for ``GenerationConfig`` (see
+``src/inference/pnr.py``) so generation halts as early as the answer is
+emitted, saving compute and keeping the produced text aligned with what
+``parse_model_output`` will return.
+"""
 
 
 # =============================================================================
@@ -49,6 +79,9 @@ def normalize_answer(text: str) -> str:
     text = text.lower()
     # Remove articles
     text = re.sub(r"\b(a|an|the)\b", " ", text)
+    # Strip Unicode quotation marks that string.punctuation misses (e.g. curly
+    # single/double quotes in raw TriviaQA aliases like ''Get over here'').
+    text = re.sub(r"[‘’“”′″]", "", text)
     # Remove punctuation except hyphens (important for dates like "2019-2020")
     text = text.translate(
         str.maketrans("", "", string.punctuation.replace("-", ""))
@@ -58,20 +91,58 @@ def normalize_answer(text: str) -> str:
     return text.strip()
 
 
-def parse_model_output(raw_text: str) -> str:
-    """Extract the final answer from model output, stripping chain-of-thought.
+def parse_model_output(
+    raw_text: str,
+    boundaries: tuple[str, ...] = DEFAULT_SHORT_ANSWER_BOUNDARIES,
+    truncate_to_short_answer: bool = True,
+) -> str:
+    """Extract the final short answer from model output.
 
-    Splits on ``</think>`` and returns everything after it.
-    Falls back to the full text if no ``</think>`` tag is present.
+    Two-stage pipeline applied uniformly across **every** dataset split
+    (SituatedQA, CounterFact ``cf_conflict``, TriviaQA ``cf_control``,
+    local JSON):
+
+    1. Strip the optional chain-of-thought block — split on ``</think>`` and
+       keep everything after the first match. Falls back to the full text
+       when no tag is present.
+    2. Truncate to the short answer at the first sentence-ending boundary
+       (``\\n``, ``.``, ``!``, ``?``). This mirrors
+       ``scripts/build_triviaqa_dcontrol.py::extract_answer`` so the runner
+       scores the same head the D_control pre-filter scored. Without this,
+       a verbose instruction-tuned continuation
+       ("Singapore is a city-state in Asia.") fails EM even when the gold
+       short answer ("Singapore") is the first token.
 
     Args:
         raw_text: Full model output (may include ``<think>`` reasoning block).
+        boundaries: Sentence-ending characters used for short-answer
+            truncation. Tuple is iterated in order, the *first* one that
+            occurs wins. Override only for diagnostics — production eval
+            should use the default for consistency.
+        truncate_to_short_answer: If ``False``, return the full
+            post-think text. Used by callers that want the entire
+            generation (e.g. judge scoring on essay-style prompts).
 
     Returns:
-        Parsed answer string.
+        Parsed answer string with leading/trailing whitespace stripped.
     """
     parts = re.split(r"</think>", raw_text, maxsplit=1)
-    return parts[-1].strip()
+    answer = parts[-1].strip()
+
+    if not truncate_to_short_answer or not answer:
+        return answer
+
+    # Priority-order truncation: a newline always wins over sentence
+    # punctuation, then the first sentence-ending punctuation in the text.
+    # Mirrors `scripts/build_triviaqa_dcontrol.py::extract_answer` byte-for-byte
+    # so the eval runner reproduces the D_control pre-filter's extraction.
+    for sep in boundaries:
+        idx = answer.find(sep)
+        if idx >= 0:
+            answer = answer[:idx]
+            break
+
+    return answer.strip()
 
 
 # =============================================================================
@@ -147,6 +218,78 @@ def compute_esr(results: list[EvalResult]) -> float | None:
     if not applicable:
         return None
     return sum(1 for r in applicable if r.routing_correct and r.is_exact_match) / len(applicable)
+
+
+def compute_logprob_esr(
+    results: list[EvalResult],
+    split_filter: str = "cf_conflict",
+) -> float | None:
+    """ROME / MEMIT-style ESR using log-probabilities instead of generation.
+
+    For every CounterFact sample we compare two log-probabilities the runner
+    has already cached on the result:
+
+    - ``logprob_target_new``  — log P(target_new  | prompt) (the edit target)
+    - ``logprob_target_true`` — log P(target_true | prompt) (the original fact)
+
+    A sample is counted as a successful edit when
+
+        log P(target_new) > log P(target_true)
+
+    i.e. the post-edit / post-routing model state assigns higher probability
+    to the counterfactual answer than to the original one. This is the metric
+    ROME (Meng et al. 2022) and MEMIT (Meng et al. 2023) report; it sidesteps
+    the parsing artefacts that plague generation-based EM by never relying on
+    decoded text.
+
+    Reported alongside generation-based ESR in the report so the thesis can
+    show both views simultaneously — large divergences flag a parsing issue,
+    a stop-sequence misconfiguration, or a generation-distribution mismatch.
+
+    Args:
+        results: All evaluation results.
+        split_filter: Restrict to a single split (default ``cf_conflict``;
+            this is the only split with a meaningful target_true / target_new
+            pair).
+
+    Returns:
+        Log-prob ESR in [0, 1], or None when no scored samples are present.
+    """
+    applicable = [
+        r
+        for r in results
+        if r.sample.split == split_filter
+        and r.logprob_target_new is not None
+        and r.logprob_target_true is not None
+    ]
+    if not applicable:
+        return None
+    return sum(
+        1
+        for r in applicable
+        if r.logprob_target_new > r.logprob_target_true
+    ) / len(applicable)
+
+
+def compute_logprob_em(results: list[EvalResult]) -> float | None:
+    """Mean fraction of samples whose gold answer beats the parametric prior.
+
+    Defined per-sample as ``r.is_logprob_match`` (the runner sets this to
+    True when log P(gold | prompt) > log P(distractor | prompt) for any
+    available distractor; for splits without distractors it falls back to
+    "did the gold receive *any* probability mass"). Aggregated as a simple
+    mean across results that carry the field.
+
+    Args:
+        results: All evaluation results.
+
+    Returns:
+        Mean log-prob match rate in [0, 1], or None when no scored samples.
+    """
+    applicable = [r for r in results if r.is_logprob_match is not None]
+    if not applicable:
+        return None
+    return sum(1 for r in applicable if r.is_logprob_match) / len(applicable)
 
 
 def compute_routing_accuracy(results: list[EvalResult]) -> float | None:

@@ -29,11 +29,14 @@ from .dataset import (
     build_counterfact_conflict_dataset,
     build_local_json_dataset,
     build_situated_qa_dataset,
+    build_sqa_train_dataset,
     build_triviaqa_control_dataset,
 )
 from .metrics import (
     compute_efficiency,
     compute_esr,
+    compute_logprob_em,
+    compute_logprob_esr,
     compute_routing_accuracy,
     compute_stability_score,
     compute_cfr,
@@ -47,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 # All valid split names
 VALID_SPLITS: set[str] = (
-    {"base", "temporal", "local", "cf_conflict", "cf_control"}
+    {"base", "temporal", "local", "cf_conflict", "cf_control", "sqa_train"}
     | {f"geo_{c}" for c in KNOWN_GEO_ADAPTERS}
 )
 
@@ -118,6 +121,14 @@ class EvalConfig:
     # force the activated specialist (LoRA adapter) to generate every answer
     # — the Patch-and-Route-conformant evaluation path.
     morpheus_direct_answer_threshold: float = 0.95
+    # KnowledgeStore tau_low: queries below this go to parametric_freedom.
+    # Must exceed max D_control sim (≤0.619) to prevent CF injection into TriviaQA.
+    morpheus_factuality_threshold_low: float = 0.65
+    # Path to a trained FactualityClassifier checkpoint directory.
+    # When set, the classifier score replaces max_sim as the factuality_score
+    # passed to KnowledgeStore.assess_factuality (the learned routing signal).
+    # Leave None to use the hardcoded tau_low / max_sim fallback.
+    morpheus_classifier_path: str | None = None
     parallel_orchestrator: bool = False  # Use Parallel-Orchestrator architecture
     parallel_max_adapters: int = 5  # Max adapters for parallel execution
     parallel_query_planner: str = "heuristic"  # "heuristic" or "llm"
@@ -129,8 +140,18 @@ class EvalConfig:
     # CounterFact / TriviaQA (cf_conflict + cf_control splits)
     counterfact_eval_path: str | None = None  # data/counterfact_eval.json
     triviaqa_dcontrol_path: str | None = None  # data/triviaqa_dcontrol.json
+    sqa_deval_path: str | None = None          # data/sqa_deval.json
     cf_adapter_name: str = "patch_cf_main"  # Adapter the router should pick for D_conflict
     cf_split_name: str = "test"  # Which split of counterfact_eval.json to use ('train' or 'test')
+    # Log-probability scoring (ROME / MEMIT-style ESR). When enabled, the
+    # runner asks the active pipeline for a teacher-forced log P(target |
+    # prompt) on every sample, after generation. Reports include:
+    #   - logprob_target_new / logprob_target_true   (CounterFact)
+    #   - logprob_gold (max over gold aliases)        (all splits)
+    #   - is_logprob_match  (gold beats target_true / random distractor)
+    #   - logprob_esr  (cf_conflict only, gold > target_true rate)
+    # See docs/roadmap.md §"Architecture Improvement TODOs" for context.
+    compute_logprob: bool = False
 
 
 # =============================================================================
@@ -174,6 +195,13 @@ class EvalResult:
     morpheus_factuality_score: float | None = None
     morpheus_max_sim: float | None = None
     morpheus_knowledge_override: bool | None = None
+    # Log-probability metrics (ROME / MEMIT-style ESR). Populated only when
+    # ``EvalConfig.compute_logprob`` is True and the pipeline exposes a
+    # ``score_targets`` method. Defaults of None encode "not measured".
+    logprob_gold: float | None = None  # max over gold aliases
+    logprob_target_new: float | None = None  # cf_conflict only
+    logprob_target_true: float | None = None  # cf_conflict only
+    is_logprob_match: bool | None = None  # gold beats distractor
 
     def to_dict(self) -> dict[str, Any]:
         """Flatten sample + result fields for JSON output."""
@@ -197,6 +225,10 @@ class EvalResult:
             "morpheus_factuality_score": self.morpheus_factuality_score,
             "morpheus_max_sim": self.morpheus_max_sim,
             "morpheus_knowledge_override": self.morpheus_knowledge_override,
+            "logprob_gold": self.logprob_gold,
+            "logprob_target_new": self.logprob_target_new,
+            "logprob_target_true": self.logprob_target_true,
+            "is_logprob_match": self.is_logprob_match,
             "metadata": self.sample.metadata,
         }
 
@@ -402,6 +434,13 @@ class EvalRunner:
         morpheus_config.knowledge_store.direct_answer_threshold = (
             self.config.morpheus_direct_answer_threshold
         )
+        morpheus_config.knowledge_store.factuality_threshold_low = (
+            self.config.morpheus_factuality_threshold_low
+        )
+        if self.config.morpheus_classifier_path:
+            morpheus_config.knowledge_store.classifier_path = (
+                self.config.morpheus_classifier_path
+            )
 
         gen_config = MorpheusGenerationConfig(
             max_new_tokens=self.config.max_new_tokens,
@@ -692,7 +731,17 @@ class EvalRunner:
             if sample.expected_adapter is None:
                 routing_correct = True
             else:
-                routing_correct = adapter_used == sample.expected_adapter
+                # Knowledge store override IS correct routing for MORPHEUS —
+                # CF knowledge lives in System 5, not in patch_cf_main.
+                # A hard_override hit on a CF query means the architecture
+                # correctly handled the edit via its non-parametric store.
+                morpheus_knowledge_override_check = bool(
+                    getattr(result, "knowledge_override", False)
+                )
+                routing_correct = (
+                    morpheus_knowledge_override_check
+                    or adapter_used == sample.expected_adapter
+                )
             routing_result = result.routing_result
             winner_sim = routing_result.winner_similarity if routing_result else None
             has_conflict = routing_result.has_conflict if routing_result else False
@@ -748,6 +797,10 @@ class EvalRunner:
                 "morpheus_knowledge_override": morpheus_knowledge_override,
             }
 
+        logprob_fields: dict[str, Any] = {}
+        if self.config.compute_logprob:
+            logprob_fields = self._compute_logprob_fields(sample, pipeline)
+
         return EvalResult(
             sample=sample,
             raw_prediction=result.response,
@@ -761,19 +814,137 @@ class EvalRunner:
             latency_ms=latency_ms,
             vram_mb=vram_mb,
             **morpheus_fields,
+            **logprob_fields,
         )
+
+    # -------------------------------------------------------------------------
+    # Log-probability scoring helper
+    # -------------------------------------------------------------------------
+
+    def _compute_logprob_fields(
+        self,
+        sample: EvalSample,
+        pipeline: Any,
+    ) -> dict[str, Any]:
+        """Run ROME / MEMIT-style teacher-forced scoring on a single sample.
+
+        Returns a dict suitable for the ``logprob_*`` fields on
+        ``EvalResult``. Silently degrades to all-None when the active
+        pipeline doesn't expose ``score_targets`` so older / experimental
+        backends keep working without modification.
+
+        Per-split target conventions:
+
+        - ``cf_conflict``: scores ``target_new`` (gold) and ``target_true``
+          (parametric prior). ``is_logprob_match = logp(new) > logp(true)``,
+          i.e. the ROME / MEMIT edit-success criterion.
+        - All other splits: scores every gold alias, takes the max, and
+          records ``is_logprob_match = True`` when at least one alias has
+          finite log-prob (i.e. tokenises cleanly). Without a paired
+          distractor we can't define edit success, so this serves as a
+          sanity / coverage signal only.
+        """
+        out: dict[str, Any] = {
+            "logprob_gold": None,
+            "logprob_target_new": None,
+            "logprob_target_true": None,
+            "is_logprob_match": None,
+        }
+
+        score_fn = getattr(pipeline, "score_targets", None)
+        if score_fn is None:
+            logger.debug(
+                "Pipeline %s has no score_targets() — skipping log-prob scoring",
+                type(pipeline).__name__,
+            )
+            return out
+
+        if sample.split == "cf_conflict":
+            target_new = sample.gold_answers[0] if sample.gold_answers else ""
+            target_true = (sample.metadata or {}).get("target_true") or ""
+            if not target_new or not target_true:
+                return out
+            try:
+                kwargs: dict[str, Any] = {}
+                # Skip-routing / force-adapter mirror what _run_single does
+                # for generation, so the model state is identical.
+                if self.config.no_adapter:
+                    kwargs["skip_routing"] = True
+                elif self.config.monolithic_adapter:
+                    kwargs["force_adapter"] = self.config.monolithic_adapter
+                scores = score_fn(
+                    sample.question,
+                    [target_new, target_true],
+                    **kwargs,
+                )
+            except TypeError:
+                scores = score_fn(sample.question, [target_new, target_true])
+            except Exception as exc:
+                logger.warning(
+                    "score_targets failed for cf_conflict sample (case_id=%s): %s",
+                    (sample.metadata or {}).get("case_id"),
+                    exc,
+                )
+                return out
+
+            lp_new = scores.get(target_new)
+            lp_true = scores.get(target_true)
+            out["logprob_target_new"] = lp_new
+            out["logprob_target_true"] = lp_true
+            out["logprob_gold"] = lp_new
+            if lp_new is not None and lp_true is not None:
+                out["is_logprob_match"] = bool(lp_new > lp_true)
+            return out
+
+        # Other splits — score every gold alias, take the max.
+        targets = [g for g in sample.gold_answers if g]
+        if not targets:
+            return out
+        try:
+            kwargs = {}
+            if self.config.no_adapter:
+                kwargs["skip_routing"] = True
+            elif self.config.monolithic_adapter:
+                kwargs["force_adapter"] = self.config.monolithic_adapter
+            scores = score_fn(sample.question, targets, **kwargs)
+        except TypeError:
+            scores = score_fn(sample.question, targets)
+        except Exception as exc:
+            logger.warning(
+                "score_targets failed for split=%s sample: %s",
+                sample.split, exc,
+            )
+            return out
+
+        finite = [v for v in scores.values() if v is not None and v != float("-inf")]
+        if not finite:
+            return out
+        out["logprob_gold"] = max(finite)
+        out["is_logprob_match"] = True
+        return out
 
     # -------------------------------------------------------------------------
     # Split-Level Evaluation
     # -------------------------------------------------------------------------
 
-    def _run_split(self, samples: list[EvalSample], pipeline, split_name: str) -> list[EvalResult]:
+    def _run_split(
+        self,
+        samples: list[EvalSample],
+        pipeline,
+        split_name: str,
+        output_dir: Path | None = None,
+        partial_every: int = 50,
+    ) -> list[EvalResult]:
         """Evaluate all samples in a split.
 
         Args:
             samples: List of EvalSample for this split.
             pipeline: PatchAndRouteInference instance.
             split_name: Name of the split (for logging).
+            output_dir: If provided, dump partial results every ``partial_every``
+                successful samples to ``output_dir/results_<split>.partial.json``.
+                Survives SIGTERM mid-split (e.g. SLURM wall-time kill).
+            partial_every: Number of successful samples between partial dumps.
 
         Returns:
             List of EvalResult objects.
@@ -782,11 +953,25 @@ class EvalRunner:
         consecutive_failures = 0
         FAIL_FAST_THRESHOLD = 10
 
+        partial_path = (
+            output_dir / f"results_{split_name}.partial.json" if output_dir else None
+        )
+
+        def _dump_partial() -> None:
+            if partial_path is None:
+                return
+            tmp = partial_path.with_suffix(partial_path.suffix + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump([r.to_dict() for r in results], f, indent=2, default=str)
+            tmp.replace(partial_path)  # atomic on POSIX
+
         for sample in tqdm(samples, desc=f"Eval [{split_name}]", unit="sample"):
             try:
                 result = self._run_single(sample, pipeline)
                 results.append(result)
                 consecutive_failures = 0
+                if partial_path is not None and len(results) % partial_every == 0:
+                    _dump_partial()
             except Exception as e:
                 consecutive_failures += 1
                 logger.warning(f"Failed on sample (split={split_name}): {e}")
@@ -838,6 +1023,18 @@ class EvalRunner:
         if any(r.morpheus_zone is not None for r in all_results):
             summary["morpheus"] = _summarise_morpheus(all_results)
 
+        # ROME / MEMIT-style log-prob ESR: shown alongside generation-based
+        # ESR so the thesis can present both in a single comparison table.
+        # Large divergences flag a parsing issue or a generation
+        # distribution-mismatch in one of the systems.
+        if any(r.is_logprob_match is not None for r in all_results):
+            lp_esr = compute_logprob_esr(all_results)
+            if lp_esr is not None:
+                summary["logprob_esr"] = lp_esr
+            lp_em = compute_logprob_em(all_results)
+            if lp_em is not None:
+                summary["logprob_em"] = lp_em
+
         # D_control forgetting rate (no baseline needed — pre-filtered to 100% base acc)
         fr = compute_dcontrol_forgetting_rate(all_results)
         if fr is not None:
@@ -866,10 +1063,19 @@ class EvalRunner:
             }
             if any(r.morpheus_zone is not None for r in split_results):
                 splits[split_name]["morpheus"] = _summarise_morpheus(split_results)
+            if any(r.is_logprob_match is not None for r in split_results):
+                if split_name == "cf_conflict":
+                    lp_esr_split = compute_logprob_esr(split_results)
+                    if lp_esr_split is not None:
+                        splits[split_name]["logprob_esr"] = round(lp_esr_split, 4)
+                lp_em_split = compute_logprob_em(split_results)
+                if lp_em_split is not None:
+                    splits[split_name]["logprob_match_rate"] = round(lp_em_split, 4)
 
         # Round optional floats in summary
         for key in ("routing_accuracy", "esr", "stability_score", "cfr", "cfr_control",
-                    "dcontrol_forgetting_rate", "dcontrol_accuracy"):
+                    "dcontrol_forgetting_rate", "dcontrol_accuracy",
+                    "logprob_esr", "logprob_em"):
             if key in summary and summary[key] is not None:
                 summary[key] = round(summary[key], 4)
 
@@ -959,6 +1165,15 @@ class EvalRunner:
                             triviaqa_path=self.config.triviaqa_dcontrol_path,
                             n_samples=self.config.n_samples,
                         )
+                    elif split_name == "sqa_train":
+                        if not self.config.sqa_deval_path:
+                            raise ValueError(
+                                "'sqa_train' requires --sqa_deval_path"
+                            )
+                        samples = build_sqa_train_dataset(
+                            sqa_deval_path=self.config.sqa_deval_path,
+                            n_samples=self.config.n_samples,
+                        )
                     else:
                         samples = build_situated_qa_dataset(
                             split=split_name,
@@ -972,11 +1187,15 @@ class EvalRunner:
                     logger.warning(f"No samples for split={split_name!r}, skipping")
                     continue
 
-                split_results = self._run_split(samples, pipeline, split_name)
+                split_results = self._run_split(
+                    samples, pipeline, split_name, output_dir=output_dir
+                )
                 all_results.extend(split_results)
 
                 # Per-split checkpoint: survives SLURM timeouts and lets
                 # single-split jobs be merged later via scripts/merge_eval_splits.py.
+                # `_run_split` also writes results_<split>.partial.json every N
+                # samples, so a mid-split kill still leaves usable results.
                 split_path = output_dir / f"results_{split_name}.json"
                 with open(split_path, "w") as f:
                     json.dump(
@@ -985,6 +1204,9 @@ class EvalRunner:
                         indent=2,
                         default=str,
                     )
+                partial_path = output_dir / f"results_{split_name}.partial.json"
+                if partial_path.exists():
+                    partial_path.unlink()
                 logger.info(f"  checkpoint: {split_path} ({len(split_results)} samples)")
 
             if not all_results:

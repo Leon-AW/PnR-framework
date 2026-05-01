@@ -8,6 +8,9 @@ This module provides:
 - PatchAndRouteInference: Main inference class tying router to LLM
 - PromptBuilder: Constructs prompts with retrieved context
 - GenerationConfig: Generation hyperparameters
+- generate_text: Stateless generation utility (used by every system in the
+  framework — PnR, Parallel Orchestrator, MORPHEUS via shared helper)
+- score_target_logprob: ROME / MEMIT-style log-probability scorer
 
 Flow:
 1. User query → Router → (winner_adapter, retrieved_context)
@@ -24,12 +27,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 from peft import PeftModel
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
+from transformers import StoppingCriteria, StoppingCriteriaList
 
+from src.eval.metrics import DEFAULT_SHORT_ANSWER_BOUNDARIES
 from src.models.core import (
     PatchAndRouteLLM,
     FrozenFoundationConfig,
@@ -47,7 +52,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GenerationConfig:
     """Configuration for text generation.
-    
+
     Attributes:
         max_new_tokens: Maximum tokens to generate.
         temperature: Sampling temperature (higher = more random).
@@ -56,6 +61,12 @@ class GenerationConfig:
         do_sample: Whether to use sampling (False = greedy).
         repetition_penalty: Penalty for repeating tokens.
         num_beams: Beam search width (1 = no beam search).
+        stop_sequences: Strings that, when emitted, terminate generation.
+            Defaults to ``DEFAULT_SHORT_ANSWER_BOUNDARIES`` (newline +
+            sentence-ending punctuation) so factoid eval halts as early
+            as the answer is emitted — this matches industry practice
+            (lm-evaluation-harness ``until``, ROME / MEMIT). Pass an
+            empty tuple to disable.
     """
     max_new_tokens: int = 256
     temperature: float = 0.7
@@ -64,9 +75,14 @@ class GenerationConfig:
     do_sample: bool = True
     repetition_penalty: float = 1.1
     num_beams: int = 1
-    
+    stop_sequences: tuple[str, ...] = DEFAULT_SHORT_ANSWER_BOUNDARIES
+
     def to_dict(self) -> dict[str, Any]:
-        """Convert to HuggingFace generate() kwargs."""
+        """Convert to HuggingFace generate() kwargs.
+
+        ``stop_sequences`` is *not* a HuggingFace-native arg; it is wired
+        into ``generate_text`` separately via a ``StoppingCriteria``.
+        """
         return {
             "max_new_tokens": self.max_new_tokens,
             "temperature": self.temperature if self.do_sample else None,
@@ -76,6 +92,62 @@ class GenerationConfig:
             "repetition_penalty": self.repetition_penalty,
             "num_beams": self.num_beams,
         }
+
+
+# =============================================================================
+# Stop Sequences (cross-system, dataset-agnostic)
+# =============================================================================
+
+class _StopOnSubstrings(StoppingCriteria):
+    """HuggingFace ``StoppingCriteria`` that halts on textual substrings.
+
+    Decoding-based check, not token-id-based: stop strings like ``"\\n"`` or
+    ``"."`` can land at different token-id positions depending on
+    BPE / SentencePiece context (e.g. ``" Berlin."`` is one token in many
+    Mistral / Llama tokenizers, while a standalone ``"."`` is another). A
+    pure token-id check therefore drops the most common factoid-EM path.
+    Decoding the *generated* slice every step is O(generated_len) per call,
+    which is negligible at the answer lengths we care about (<= 30 tokens).
+    """
+
+    __slots__ = ("_tokenizer", "_stop_strings", "_prompt_lens")
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        stop_strings: Sequence[str],
+        prompt_lens: Sequence[int],
+    ) -> None:
+        self._tokenizer = tokenizer
+        # Drop empty strings — they would short-circuit on every step.
+        self._stop_strings = tuple(s for s in stop_strings if s)
+        self._prompt_lens = tuple(int(p) for p in prompt_lens)
+
+    def __call__(
+        self,
+        input_ids: torch.LongTensor,
+        scores: torch.FloatTensor,
+        **kwargs: Any,
+    ) -> bool:
+        if not self._stop_strings:
+            return False
+        # Greedy / beam=1 path emits one row; treat any-row trigger as a stop
+        # so the runner can rely on substring termination semantics.
+        for row_idx in range(input_ids.shape[0]):
+            prompt_len = (
+                self._prompt_lens[row_idx]
+                if row_idx < len(self._prompt_lens)
+                else self._prompt_lens[-1]
+            )
+            new_ids = input_ids[row_idx, prompt_len:]
+            if new_ids.numel() == 0:
+                continue
+            decoded = self._tokenizer.decode(
+                new_ids, skip_special_tokens=True
+            )
+            if any(stop in decoded for stop in self._stop_strings):
+                return True
+        return False
 
 
 @dataclass
@@ -214,7 +286,13 @@ def generate_text(
     """Generate text from a prompt using a model and tokenizer.
 
     Stateless utility that can be used by any component needing text generation
-    (PatchAndRouteInference, ParallelOrchestrator, etc.).
+    (PatchAndRouteInference, ParallelOrchestrator, MORPHEUS, etc.).
+
+    Stop-sequence behaviour is governed by ``config.stop_sequences``: when
+    non-empty, generation halts as soon as any of the listed substrings
+    appears in the decoded continuation. This applies uniformly across all
+    callers (and therefore all dataset splits) so factoid EM is consistent
+    between PnR, the Parallel Orchestrator, MORPHEUS, etc.
 
     Args:
         model: The model to generate with (base or PEFT-wrapped).
@@ -224,7 +302,10 @@ def generate_text(
         use_gpu: Whether to move inputs to GPU.
 
     Returns:
-        Generated text (response only, prompt stripped).
+        Generated text (response only, prompt stripped). When a stop
+        sequence triggers, the trailing stop substring is *not* trimmed —
+        ``parse_model_output`` re-applies the same boundary logic so the
+        scoring path stays single-source-of-truth.
     """
     inputs = tokenizer(
         prompt,
@@ -236,11 +317,23 @@ def generate_text(
     if use_gpu:
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
+    stopping_criteria: StoppingCriteriaList | None = None
+    if config.stop_sequences:
+        prompt_lens = [int(inputs["input_ids"].shape[1])]
+        stopping_criteria = StoppingCriteriaList([
+            _StopOnSubstrings(
+                tokenizer=tokenizer,
+                stop_strings=config.stop_sequences,
+                prompt_lens=prompt_lens,
+            )
+        ])
+
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            stopping_criteria=stopping_criteria,
             **config.to_dict(),
         )
 
@@ -249,6 +342,100 @@ def generate_text(
     response = tokenizer.decode(response_tokens, skip_special_tokens=True)
 
     return response.strip()
+
+
+# =============================================================================
+# Log-probability scoring (ROME / MEMIT-style ESR)
+# =============================================================================
+
+@torch.no_grad()
+def score_target_logprob(
+    model: PreTrainedModel | PeftModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt: str,
+    target: str,
+    use_gpu: bool = True,
+    length_normalised: bool = False,
+) -> float:
+    """Compute the conditional log-probability of ``target`` given ``prompt``.
+
+    Industry-standard knowledge-editing metric (ROME, MEMIT, GRACE, MEND):
+    instead of decoding text and string-matching, we score whether the
+    model assigns higher probability to the edit target than to the
+    original fact. This sidesteps every parsing artefact and gives a
+    smooth, differentiable signal — a sample with EM=0 but
+    ``logp(target_new) > logp(target_true)`` is a *successful* edit by
+    the field's standard definition.
+
+    Implementation is teacher-forced: we tokenise ``prompt + " " + target``
+    in one go, run a single forward pass, and sum the per-token
+    log-probabilities for the target slice. The leading space is added
+    only when the prompt does not already end in whitespace (matches
+    SentencePiece / Mistral conventions where ``"_Berlin"`` is the
+    natural continuation).
+
+    Args:
+        model: The model to score with (base or PEFT-wrapped). Must be in
+            eval mode; this helper does *not* call ``model.eval()`` since
+            that mutation is the caller's responsibility.
+        tokenizer: Tokenizer paired with ``model``.
+        prompt: Full formatted prompt (post chat-template).
+        target: Target text to score (usually one or a few tokens).
+        use_gpu: Whether to move tensors to ``model.device``.
+        length_normalised: If True, return mean log-prob per target
+            token instead of the sum. Useful when comparing targets of
+            different lengths; default ``False`` matches ROME / MEMIT.
+
+    Returns:
+        Total (or mean) log-probability of ``target`` as a Python float.
+        Returns ``-inf`` when ``target`` tokenises to an empty span — the
+        caller can treat that as "untestable" without special-casing.
+    """
+    if not target:
+        return float("-inf")
+
+    needs_space = bool(prompt) and not prompt[-1].isspace()
+    sep = " " if needs_space else ""
+    prompt_ids = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=True,
+        truncation=True,
+        max_length=4096,
+    )["input_ids"]
+    full_ids = tokenizer(
+        prompt + sep + target,
+        return_tensors="pt",
+        add_special_tokens=True,
+        truncation=True,
+        max_length=4096,
+    )["input_ids"]
+
+    target_len = int(full_ids.shape[1] - prompt_ids.shape[1])
+    if target_len <= 0:
+        return float("-inf")
+
+    if use_gpu:
+        full_ids = full_ids.to(model.device)
+
+    # Pass via keyword: the official RECIPE editor wraps `model.forward` with
+    # `forward_recipe(**kargs)` (external/RECIPE/editors/recipe/recipe.py:119)
+    # which rejects positional args. `input_ids=` is the canonical kwarg name
+    # for every HuggingFace causal LM, so this stays generic.
+    logits = model(input_ids=full_ids).logits  # (1, seq, vocab)
+    # Shift: position t predicts token t+1; gather log-probs for the
+    # target slice only (the last `target_len` tokens of `full_ids`).
+    log_probs = torch.log_softmax(logits[0, :-1, :], dim=-1)
+    target_token_ids = full_ids[0, 1:]
+    target_slice = target_token_ids[-target_len:]
+    target_logprobs = log_probs[-target_len:].gather(
+        1, target_slice.unsqueeze(-1)
+    ).squeeze(-1)
+
+    total = float(target_logprobs.sum().item())
+    if length_normalised:
+        return total / target_len
+    return total
 
 
 # =============================================================================
@@ -474,6 +661,70 @@ class PatchAndRouteInference:
         """
         model, tokenizer = self._llm.get_inference_components()
         return generate_text(model, tokenizer, prompt, config, use_gpu=self.use_gpu)
+
+    # -------------------------------------------------------------------------
+    # Log-probability scoring (ROME / MEMIT-style ESR)
+    # -------------------------------------------------------------------------
+
+    def score_targets(
+        self,
+        query: str,
+        targets: list[str],
+        skip_routing: bool = False,
+        force_adapter: str | None = None,
+    ) -> dict[str, float]:
+        """Compute log P(target | prompt) for each target on the routed model.
+
+        Sets up the *exact* same model state used for ``generate`` (router
+        chooses the adapter, source-replay context is added to the prompt,
+        etc.) and then scores each target via teacher-forced log-probability.
+        Identical control flow to ``generate`` so the two metrics are
+        comparable for a single sample without re-routing artefacts.
+
+        Args:
+            query: User's input query.
+            targets: List of target strings (e.g. ``[target_new, target_true]``
+                for CounterFact, or ``gold_aliases`` for TriviaQA).
+            skip_routing: Same semantics as ``generate``.
+            force_adapter: Same semantics as ``generate``.
+
+        Returns:
+            ``{target: logprob}`` mapping (sum-of-log-probs, *not*
+            length-normalised — matches ROME / MEMIT convention).
+        """
+        self._ensure_llm_loaded()
+
+        retrieved_context = ""
+
+        if not skip_routing and not force_adapter:
+            routing_result = self.router.route(query)
+            if routing_result.winner_path:
+                self._load_adapter(routing_result.winner_path)
+                retrieved_context = routing_result.retrieved_context
+        elif force_adapter:
+            self._load_adapter(force_adapter)
+        elif skip_routing and self._llm and self._llm.has_expert_attached:
+            # CFR Pass 1 / frozen-base scoring must NOT see the previous
+            # sample's adapter — detach if one is left over from generate().
+            self._llm.detach_expert()
+            self._current_adapter = None
+
+        full_prompt = self._prompt_builder.build(
+            query=query,
+            retrieved_context=retrieved_context,
+        )
+
+        model, tokenizer = self._llm.get_inference_components()
+        scores: dict[str, float] = {}
+        for target in targets:
+            scores[target] = score_target_logprob(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=full_prompt,
+                target=target,
+                use_gpu=self.use_gpu,
+            )
+        return scores
     
     # -------------------------------------------------------------------------
     # Batch Generation

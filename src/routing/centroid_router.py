@@ -88,21 +88,37 @@ class CentroidRouter(BaseRouter):
         max_context_length: int = 2000,
         use_gpu: bool = True,
         store_dir: str | Path | None = None,
+        always_on_replay: bool = True,
+        winner_replay_top_k: int = 3,
     ) -> None:
         """Initialize the Centroid Router.
-        
+
         Args:
             embedding_model_path: Path to local embedding model.
             embedding_fn: Custom embedding function (alternative to model path).
-            similarity_threshold: Minimum similarity to consider a match.
+            similarity_threshold: Global fallback minimum similarity to
+                consider a match. Per-adapter calibrated thresholds (stored
+                in `AdapterEntry.metadata['similarity_threshold']` by
+                `scripts/build_router_state.py`) take precedence; this value
+                is used only for adapters without a calibrated threshold.
             conflict_threshold: Similarity gap to consider as conflict.
             top_k_retrieval: Number of chunks to retrieve per loser adapter.
+            retrieval_threshold: Minimum similarity for a retrieved chunk
+                to be kept (filters low-relevance hallucination fodder).
             max_context_length: Maximum context length for Source-Replay.
             use_gpu: Whether to use GPU for embedding and FAISS.
             store_dir: Directory for persisting indices and manifest.
+            always_on_replay: If True, the winner adapter also contributes
+                Source-Replay chunks (read from its own `DataIndices_i`),
+                not only loser adapters. This realises the architecture's
+                full `Adapter_i = {Weights_i, DataIndices_i}` tuple — the
+                LoRA biases the distribution toward the right answer space
+                while the retrieved text supplies the exact token sequence.
+            winner_replay_top_k: Number of chunks to retrieve from the
+                winner's index when `always_on_replay=True`.
         """
         super().__init__(strategy=RoutingStrategy.CENTROID)
-        
+
         self.similarity_threshold = similarity_threshold
         self.conflict_threshold = conflict_threshold
         self.top_k_retrieval = top_k_retrieval
@@ -110,6 +126,8 @@ class CentroidRouter(BaseRouter):
         self.max_context_length = max_context_length
         self.use_gpu = use_gpu
         self.store_dir = Path(store_dir) if store_dir else None
+        self.always_on_replay = always_on_replay
+        self.winner_replay_top_k = winner_replay_top_k
         
         # Initialize embedding model
         self._embedding_model = None
@@ -731,15 +749,28 @@ class CentroidRouter(BaseRouter):
 
         best_sim_per_adapter: dict[str, float] = {}
         for adapter_id, sim in zip(row_adapter_ids, row_similarities):
-            s = float(sim)
+            # Clamp into [0, 1]: with per-chunk anchors a query may coincide
+            # exactly with a training anchor, and float32 cosine can land at
+            # 1 + ε (e.g. 1.0000001). `AdapterMatch.__post_init__` enforces
+            # the [0, 1] bound — without clamping the constructor raises.
+            s = float(np.clip(sim, 0.0, 1.0))
             if s > best_sim_per_adapter.get(adapter_id, -np.inf):
                 best_sim_per_adapter[adapter_id] = s
 
-        # Step 4: Filter matches above threshold
+        # Step 4: Filter matches above threshold.
+        # Per-adapter calibrated thresholds (set by build_router_state.py from
+        # in-domain training similarities and a held-out OOD negative pool)
+        # take precedence over the global fallback. This is the core of the
+        # fix for CF FR=99.8%: TriviaQA queries no longer pass each adapter's
+        # individually calibrated bar even when their bare similarity beats
+        # the legacy 0.45 global cutoff.
         matches = []
         for adapter_id, sim in best_sim_per_adapter.items():
-            if sim >= self.similarity_threshold:
-                entry = self._manifest[adapter_id]
+            entry = self._manifest[adapter_id]
+            adapter_threshold = entry.metadata.get(
+                "similarity_threshold", self.similarity_threshold
+            )
+            if sim >= adapter_threshold:
                 matches.append(AdapterMatch(
                     adapter_id=adapter_id,
                     similarity=sim,
@@ -787,39 +818,66 @@ class CentroidRouter(BaseRouter):
         
         logger.info(f"Winner adapter: {winner_id} (sim={matches[0].similarity:.3f})")
         
-        # Step 7: Source-Replay for losers
+        # Step 7: Source-Replay
+        # Two contributors:
+        #   (a) losers from a temporal/centroid conflict (T_old in the exposé)
+        #   (b) the winner itself when `always_on_replay=True` — realises the
+        #       full `Adapter_i = {Weights_i, DataIndices_i}` tuple. The LoRA
+        #       biases the distribution toward the right answer space and the
+        #       retrieved chunks supply the exact token sequence, closing the
+        #       parametric-only ceiling that caps CF ESR.
         retrieved_context = ""
         loser_ids = [m.adapter_id for m in matches[1:] if not m.is_winner]
-        
-        if loser_ids and self._source_replay:
-            logger.info(f"Retrieving context from losers: {loser_ids}")
-            
-            chunks = self._source_replay.retrieve_multi(
-                query_embedding=query_embedding,
-                adapter_ids=loser_ids,
-                top_k_per_adapter=self.top_k_retrieval,
+
+        replay_targets: list[tuple[str, int]] = []
+        if self.always_on_replay:
+            replay_targets.append((winner_id, self.winner_replay_top_k))
+        for lid in loser_ids:
+            replay_targets.append((lid, self.top_k_retrieval))
+
+        if replay_targets and self._source_replay:
+            target_ids = [tid for tid, _ in replay_targets]
+            logger.info(
+                f"Source-Replay targets: winner={winner_id}, "
+                f"losers={loser_ids}, always_on={self.always_on_replay}"
             )
-            
+
+            chunks: list[RetrievedChunk] = []
+            for adapter_id, top_k in replay_targets:
+                chunks.extend(
+                    self._source_replay.retrieve(
+                        query_embedding=query_embedding,
+                        adapter_id=adapter_id,
+                        top_k=top_k,
+                    )
+                )
+
             # Filter low-relevance chunks to reduce hallucination
             original_count = len(chunks)
             chunks = [c for c in chunks if c.similarity >= self.retrieval_threshold]
             filtered_count = len(chunks)
-            
-            if original_count > filtered_count:
-                logger.info(f"Filtered {original_count - filtered_count} chunks below threshold {self.retrieval_threshold}")
 
-            # Store retrieved text in match objects
+            if original_count > filtered_count:
+                logger.info(
+                    f"Filtered {original_count - filtered_count} chunks below "
+                    f"threshold {self.retrieval_threshold}"
+                )
+
+            # Sort by similarity so the winner's high-relevance hits dominate
+            # the prompt budget (build_context truncates from the front).
+            chunks.sort(key=lambda c: c.similarity, reverse=True)
+
+            # Store retrieved text per match for downstream inspection.
             for match in matches:
-                if not match.is_winner:
-                    match.retrieved_context = [
-                        c.text for c in chunks if c.adapter_id == match.adapter_id
-                    ]
-            
+                match.retrieved_context = [
+                    c.text for c in chunks if c.adapter_id == match.adapter_id
+                ]
+
             retrieved_context = SourceReplayStore.build_context(
                 chunks,
                 max_context_length=self.max_context_length,
             )
-        
+
         return RoutingResult(
             winner_adapter=winner_id,
             winner_path=winner_entry.adapter_path,
@@ -878,9 +936,22 @@ class CentroidRouter(BaseRouter):
         manifest_path = path / "manifest.json"
         if manifest_path.exists():
             router._manifest = AdapterManifest.load(manifest_path)
-        
+
+        # Auto-initialise Source-Replay when FAISS sidecar files are present.
+        # `build_router_state.py` writes one `{adapter_id}.faiss + .pkl` pair
+        # per adapter into the same directory as the manifest. Without this
+        # step `route()` would silently skip retrieval (Change 3 would be a
+        # no-op at eval time).
+        faiss_files = list(path.glob("*.faiss"))
+        if faiss_files:
+            router.initialize_source_replay(path)
+            logger.info(
+                f"Auto-initialised Source-Replay from {len(faiss_files)} "
+                f"FAISS index file(s) in {path}"
+            )
+
         logger.info(f"Router loaded from {path}")
-        
+
         return router
     
     def summary(self) -> str:

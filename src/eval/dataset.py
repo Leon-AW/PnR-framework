@@ -7,6 +7,7 @@ Data representation and dataset builders for the PnR evaluation suite.
 Provides:
 - EvalSample: Dataclass representing a single evaluation sample
 - build_situated_qa_dataset: Build eval samples from SituatedQA streams
+- build_sqa_train_dataset:   SituatedQA D_eval training samples (standardised)
 - build_local_json_dataset: Build eval samples from local JSON files
 - build_counterfact_conflict_dataset: CounterFact D_conflict samples
 - build_triviaqa_control_dataset:    TriviaQA D_control samples
@@ -213,6 +214,76 @@ def build_local_json_dataset(
 
 
 # =============================================================================
+# SituatedQA D_eval Builder (standardised 1000-sample training-set probe)
+# =============================================================================
+
+def build_sqa_train_dataset(
+    sqa_deval_path: str,
+    n_samples: int,
+    random_seed: int = D_EVAL_SAMPLING_SEED,
+) -> list[EvalSample]:
+    """Build SituatedQA D_eval samples from a pre-built JSON file.
+
+    The JSON file is produced by ``scripts/build_sqa_deval.py`` and contains
+    records drawn uniformly from all SituatedQA **training** streams (base,
+    temporal, geo_*).  Using a fixed file — rather than live HF streams —
+    ensures every system is evaluated on the *same* 1 000 questions.
+
+    Evaluation is done at batch_size=1 (sequential inference) so that results
+    are byte-identical to the D_control pre-filter conditions.
+
+    Args:
+        sqa_deval_path: Path to ``data/sqa_deval.json``.
+        n_samples: Maximum number of records to load (default 1 000).
+        random_seed: Seed for sub-sampling when ``n_samples`` < pool size.
+
+    Returns:
+        List of EvalSample instances with ``split='sqa_train'``.
+    """
+    path = Path(sqa_deval_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"SituatedQA D_eval file not found: {path}. "
+            "Run `scripts/build_sqa_deval.py` first."
+        )
+    with path.open(encoding="utf-8") as f:
+        records: list[dict] = json.load(f)
+
+    if n_samples < len(records):
+        rng = random.Random(random_seed)
+        selected_indices = sorted(rng.sample(range(len(records)), n_samples))
+        records = [records[i] for i in selected_indices]
+        logger.info(
+            f"SQA D_eval: uniform-random sample of {n_samples} from "
+            f"{len(records)} records (seed={random_seed})"
+        )
+
+    samples: list[EvalSample] = []
+    for rec in records:
+        question = rec.get("question", "").strip()
+        answers = rec.get("answers", [])
+        if isinstance(answers, str):
+            answers = [answers]
+        answers = [str(a).strip() for a in answers if a and str(a).strip()]
+        if not question or not answers:
+            continue
+        samples.append(EvalSample(
+            question=question,
+            gold_answers=answers,
+            expected_adapter=_infer_expected_adapter(rec.get("split_origin", "")),
+            split="sqa_train",
+            metadata={
+                "split_origin": rec.get("split_origin"),
+                "date":         rec.get("metadata", {}).get("date"),
+                "location":     rec.get("metadata", {}).get("location"),
+            },
+        ))
+
+    logger.info(f"Built {len(samples)} SQA D_eval samples from {path}")
+    return samples
+
+
+# =============================================================================
 # CounterFact / TriviaQA Builders (D_conflict + D_control)
 # =============================================================================
 
@@ -353,10 +424,15 @@ def build_triviaqa_control_dataset(
     samples: list[EvalSample] = []
     for rec in tq_records:
         question = rec.get("question")
-        aliases = rec.get("all_aliases") or []
+        # Prefer pre-normalized aliases (used by the D_control pre-filter in
+        # build_triviaqa_dcontrol.py::is_correct). Raw all_aliases can contain
+        # Unicode curly quotes that survive normalize_answer's ASCII-only
+        # punctuation stripping, causing spurious EM mismatches for the frozen
+        # base — the very model that was pre-filtered to 100% accuracy.
+        aliases = rec.get("normalized_aliases") or rec.get("all_aliases") or []
         if isinstance(aliases, str):
             aliases = [aliases]
-        answer = rec.get("answer") or rec.get("normalized_answer")
+        answer = rec.get("normalized_answer") or rec.get("answer")
         gold = [a for a in (aliases + ([answer] if answer else [])) if a]
         gold = list(dict.fromkeys(gold))  # dedupe, preserve order
 

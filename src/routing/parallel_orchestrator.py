@@ -762,6 +762,111 @@ class ParallelOrchestrator:
         """Get the underlying CentroidRouter."""
         return self.router
 
+    # -------------------------------------------------------------------------
+    # Log-probability scoring (ROME / MEMIT-style ESR)
+    # -------------------------------------------------------------------------
+
+    def score_targets(self, query: str, targets: list[str]) -> dict[str, float]:
+        """Compute log P(target | prompt) under the Resolver / single-adapter state.
+
+        The Parallel Orchestrator's final answer is produced either by the
+        single matching adapter (short-circuit path) or by the base-model
+        Resolver after synthesis. For log-prob scoring we mirror the same
+        decision tree:
+
+        - If exactly one adapter matches, score against that adapter's state.
+        - If multiple adapters match, score against the **base model**
+          (no adapter attached) using the *synthesis prompt* — that is the
+          distribution the orchestrator's reported answer is sampled from.
+        - If no adapter matches, score against the base model with the bare
+          user prompt (matches ``_generate_base_only``).
+
+        This keeps the log-prob view faithful to the system's actual output
+        distribution rather than dropping back to a generic frozen-base
+        scoring path.
+        """
+        from src.inference import score_target_logprob
+
+        plan = self.plan_query(query)
+        selected = self.select_adapters(query, plan)
+
+        # No adapters — base model, bare prompt
+        if not selected:
+            if self.llm.has_expert_attached:
+                self.llm.detach_expert()
+            prompt = self._prompt_builder.build(query=query)
+            model, tokenizer = self.llm.get_inference_components()
+            return {
+                t: score_target_logprob(
+                    model=model, tokenizer=tokenizer, prompt=prompt,
+                    target=t, use_gpu=self.use_gpu,
+                )
+                for t in targets
+            }
+
+        # Single adapter — score under that adapter's state
+        if len(selected) == 1:
+            entry = self.router._manifest.get(selected[0].adapter_id)
+            if self.llm.has_expert_attached:
+                self.llm.detach_expert()
+            if entry is not None:
+                self.llm.load_expert(entry.adapter_path)
+            prompt = self._prompt_builder.build(query=query)
+            model, tokenizer = self.llm.get_inference_components()
+            scores = {
+                t: score_target_logprob(
+                    model=model, tokenizer=tokenizer, prompt=prompt,
+                    target=t, use_gpu=self.use_gpu,
+                )
+                for t in targets
+            }
+            if self.llm.has_expert_attached:
+                self.llm.detach_expert()
+            return scores
+
+        # Multi-adapter — run the full pipeline so the synthesis prompt is
+        # available, then score the targets against the synthesis state.
+        adapter_outputs, _ = self.execute_parallel(query, selected)
+        if not adapter_outputs:
+            if self.llm.has_expert_attached:
+                self.llm.detach_expert()
+            prompt = self._prompt_builder.build(query=query)
+            model, tokenizer = self.llm.get_inference_components()
+            return {
+                t: score_target_logprob(
+                    model=model, tokenizer=tokenizer, prompt=prompt,
+                    target=t, use_gpu=self.use_gpu,
+                )
+                for t in targets
+            }
+
+        # Build the same synthesis prompt the Resolver would see, and score
+        # the targets against the base model in that context.
+        source_parts = []
+        for adapter_id, output in adapter_outputs.items():
+            entry = self.router._manifest.get(adapter_id)
+            ts_desc = (
+                datetime.fromtimestamp(entry.timestamp).strftime("%Y-%m-%d")
+                if entry and entry.timestamp else "unknown date"
+            )
+            source_parts.append(
+                f"[Source: {adapter_id} (trained {ts_desc})]\n{output}"
+            )
+        synthesis_text = SYNTHESIS_PROMPT_TEMPLATE.format(
+            query=query, source_answers="\n\n".join(source_parts),
+        )
+        synthesis_prompt = self._prompt_builder.build(
+            query=synthesis_text, include_system=False,
+        )
+        model, tokenizer = self.llm.get_inference_components()
+        return {
+            t: score_target_logprob(
+                model=model, tokenizer=tokenizer, prompt=synthesis_prompt,
+                target=t, use_gpu=self.use_gpu,
+            )
+            for t in targets
+        }
+
     def summary(self) -> str:
         """Get a formatted summary of the orchestrator."""
         lines = [

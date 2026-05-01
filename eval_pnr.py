@@ -232,6 +232,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sqa_deval_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to data/sqa_deval.json (produced by "
+            "scripts/build_sqa_deval.py). Required when --eval_sets "
+            "includes 'sqa_train'."
+        ),
+    )
+    parser.add_argument(
         "--cf_adapter_name",
         type=str,
         default="patch_cf_main",
@@ -269,6 +279,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--morpheus_factuality_threshold_low",
+        type=float,
+        default=0.65,
+        help=(
+            "Knowledge store tau_low: queries with sim < this go to parametric_freedom "
+            "(no CF injection). Must exceed the max D_control similarity (≤0.619 on "
+            "TriviaQA) to prevent CF triples leaking into TriviaQA answers."
+        ),
+    )
+    parser.add_argument(
         "--morpheus_direct_answer_threshold",
         type=float,
         default=0.95,
@@ -280,6 +300,18 @@ def parse_args() -> argparse.Namespace:
             "force adapter-based generation (recommended for Patch-and-Route "
             "evaluation, since the bypass reduces MORPHEUS to retrieval "
             "and decouples the result from the activated specialist)."
+        ),
+    )
+    parser.add_argument(
+        "--morpheus_classifier_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a trained FactualityClassifier checkpoint directory "
+            "(produced by scripts/train_factuality_classifier.py). When set, "
+            "the MLP classifier score replaces max_sim as the factuality_score "
+            "passed to KnowledgeStore.assess_factuality. Omit to use the "
+            "hardcoded tau_low / max_sim fallback."
         ),
     )
 
@@ -302,6 +334,20 @@ def parse_args() -> argparse.Namespace:
         "--use_llm_judge",
         action="store_true",
         help="Enable LLM-as-a-judge scoring",
+    )
+
+    # ROME / MEMIT-style log-probability ESR
+    parser.add_argument(
+        "--compute_logprob",
+        action="store_true",
+        help=(
+            "Additionally compute teacher-forced log P(target | prompt) "
+            "for each sample (ROME / MEMIT-style ESR). For 'cf_conflict' "
+            "this scores both target_new and target_true so the report "
+            "can show whether the edited model assigns higher probability "
+            "to the counterfactual than to the original fact — a metric "
+            "that sidesteps generation-parsing artefacts."
+        ),
     )
 
     # MLflow
@@ -365,6 +411,9 @@ def main() -> None:
     if "cf_control" in args.eval_sets and not args.triviaqa_dcontrol_path:
         logger.error("--eval_sets includes 'cf_control' but no --triviaqa_dcontrol_path provided")
         sys.exit(1)
+    if "sqa_train" in args.eval_sets and not args.sqa_deval_path:
+        logger.error("--eval_sets includes 'sqa_train' but no --sqa_deval_path provided")
+        sys.exit(1)
 
     config = EvalConfig(
         model_id=args.model_id,
@@ -389,10 +438,13 @@ def main() -> None:
         morpheus_state_dir=args.morpheus_state_dir,
         morpheus_similarity_threshold=args.morpheus_similarity_threshold,
         morpheus_direct_answer_threshold=args.morpheus_direct_answer_threshold,
+        morpheus_factuality_threshold_low=args.morpheus_factuality_threshold_low,
+        morpheus_classifier_path=args.morpheus_classifier_path,
         recipe_official_checkpoint=args.recipe_official,
         recipe_official_edits_path=args.recipe_official_edits,
         counterfact_eval_path=args.counterfact_eval_path,
         triviaqa_dcontrol_path=args.triviaqa_dcontrol_path,
+        sqa_deval_path=args.sqa_deval_path,
         cf_adapter_name=args.cf_adapter_name,
         cf_split_name=args.cf_split_name,
         max_new_tokens=args.max_new_tokens,
@@ -402,6 +454,7 @@ def main() -> None:
         mlflow_run_name=args.run_name,
         output_dir=args.output_dir,
         use_llm_judge=args.use_llm_judge,
+        compute_logprob=args.compute_logprob,
     )
 
     logger.info(f"  Model: {config.model_id}")
@@ -420,6 +473,10 @@ def main() -> None:
         logger.info(f"  Mode: MORPHEUS multi-system architecture")
         if config.morpheus_state_dir:
             logger.info(f"         State dir: {config.morpheus_state_dir}")
+        if config.morpheus_classifier_path:
+            logger.info(f"         Classifier: {config.morpheus_classifier_path}")
+        else:
+            logger.info(f"         Classifier: tau_low={config.morpheus_factuality_threshold_low} (no classifier)")
     elif config.recipe_official_checkpoint:
         logger.info(f"  Mode: RECIPE (official repo) — {config.recipe_official_checkpoint}")
         if config.recipe_official_edits_path:
@@ -487,6 +544,13 @@ def main() -> None:
         if fr is not None:
             acc = summary.get("dcontrol_accuracy", "N/A")
             logger.info(f"  D_ctrl FR:     {fr}   (acc={acc})")
+
+        lp_esr = summary.get("logprob_esr")
+        if lp_esr is not None:
+            logger.info(f"  ESR (log-prob):{lp_esr}   (ROME/MEMIT-style)")
+        lp_em = summary.get("logprob_em")
+        if lp_em is not None:
+            logger.info(f"  Log-prob match:{lp_em}")
 
         eff = summary.get("efficiency", {})
         if eff:

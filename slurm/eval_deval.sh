@@ -1,6 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=eval_deval
 #SBATCH --partition=longgpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --gres=gpu:a10080gb:1
 #SBATCH --nodelist=gruenau10
 #SBATCH --cpus-per-task=8
@@ -9,6 +11,20 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --mail-type=END,FAIL
+
+# GPU + node convention (Apr 29 2026, post-mortem):
+# Only gruenau10 (3× A100-80GB, dedicated devices) is safe for these eval
+# jobs. We tried adding gruenau7 (4× RTX A6000) on Apr 29 17:30, but that
+# node advertises `gpu:rtxa6000:4,mps:r` — i.e. NVIDIA MPS residual mode
+# is the default and a `gres=gpu:1` request returns an MPS slice with
+# ~0.8 GiB visible memory, not a full RTX A6000. Bitsandbytes 4-bit then
+# falls back to CPU/float32 and inference collapses to ~2500 s / sample
+# (jobs 352197–352200 observed at 1/1000 progress after 41 min).
+# gruenau9 has the same MPS-overbooking issue (see roadmap §"Compute
+# Convention"), gruenau8 is heavily allocated. So we pin to gruenau10
+# exclusively and accept the 3-way concurrency cap.
+# `--nodes=1` + `--ntasks=1` keep SLURM from over-allocating across nodes
+# when a multi-element nodelist is restored later.
 
 # ==============================================================================
 # D_eval Evaluation — D_conflict (CF ESR) + D_control (forgetting rate)

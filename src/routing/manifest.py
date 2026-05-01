@@ -84,12 +84,22 @@ class AdapterEntry:
         """Get human-readable timestamp string."""
         return self.timestamp_dt.strftime("%Y-%m-%d %H:%M:%S")
     
-    def to_dict(self, include_centroid: bool = False) -> dict[str, Any]:
+    def to_dict(
+        self,
+        include_centroid: bool = False,
+        inline_clusters: bool = True,
+    ) -> dict[str, Any]:
         """Convert to dictionary for serialization.
-        
+
         Args:
             include_centroid: Whether to include the centroid vector.
-            
+            inline_clusters: Whether to embed `cluster_centroids` as nested
+                lists in the JSON output. Set False when the manifest writer
+                offloads per-chunk anchors to a sidecar `.npz` file (the
+                default for `AdapterManifest.save()`); a marker
+                ``num_cluster_centroids`` is still written so the reader
+                knows to expect a sidecar entry.
+
         Returns:
             Dictionary representation.
         """
@@ -101,13 +111,14 @@ class AdapterEntry:
             "adapter_type": self.adapter_type,
             "source_data_path": self.source_data_path,
             "has_centroid": self.has_centroid,
+            "num_cluster_centroids": self.num_clusters,
             "metadata": self.metadata,
         }
         
         if include_centroid and self.centroid is not None:
             result["centroid"] = self.centroid.tolist()
 
-        if include_centroid and self.cluster_centroids:
+        if include_centroid and inline_clusters and self.cluster_centroids:
             result["cluster_centroids"] = [c.tolist() for c in self.cluster_centroids]
 
         return result
@@ -181,7 +192,16 @@ class AdapterManifest:
     def __init__(self) -> None:
         """Initialize empty manifest."""
         self._entries: dict[str, AdapterEntry] = {}
+        # Cache for the per-cluster centroid matrix returned by
+        # `get_cluster_centroids_flat()`. With per-chunk anchors this matrix
+        # can reach 30 MB+; rebuilding it on every routed query (CF eval is
+        # 21k queries) is wasteful. Invalidated whenever entries change.
+        self._cluster_matrix_cache: tuple[np.ndarray, list[str]] | None = None
         logger.info("Initialized empty AdapterManifest")
+
+    def _invalidate_cluster_cache(self) -> None:
+        """Drop the cached per-cluster centroid matrix."""
+        self._cluster_matrix_cache = None
     
     # -------------------------------------------------------------------------
     # Properties
@@ -247,8 +267,9 @@ class AdapterManifest:
         )
         
         self._entries[adapter_id] = entry
+        self._invalidate_cluster_cache()
         logger.info(f"Registered adapter: {adapter_id} (type={adapter_type})")
-        
+
         return entry
     
     def get(self, adapter_id: str) -> AdapterEntry | None:
@@ -285,6 +306,7 @@ class AdapterManifest:
         """
         if adapter_id in self._entries:
             del self._entries[adapter_id]
+            self._invalidate_cluster_cache()
             logger.info(f"Unregistered adapter: {adapter_id}")
             return True
         return False
@@ -303,6 +325,7 @@ class AdapterManifest:
             raise KeyError(f"Adapter '{adapter_id}' not found in manifest")
         
         self._entries[adapter_id].centroid = centroid.astype(np.float32)
+        self._invalidate_cluster_cache()
         logger.info(f"Updated centroid for adapter: {adapter_id} (dim={centroid.shape[0]})")
 
     def update_cluster_centroids(
@@ -344,6 +367,7 @@ class AdapterManifest:
             mean = mean / norm
         entry.centroid = mean.astype(np.float32)
 
+        self._invalidate_cluster_cache()
         logger.info(
             f"Updated cluster centroids for adapter: {adapter_id} "
             f"(k={len(clusters)}, dim={clusters[0].shape[0]})"
@@ -415,6 +439,9 @@ class AdapterManifest:
         Raises:
             ValueError: If no adapters have any centroids.
         """
+        if self._cluster_matrix_cache is not None:
+            return self._cluster_matrix_cache
+
         rows: list[np.ndarray] = []
         row_ids: list[str] = []
         for entry in self._entries.values():
@@ -429,61 +456,115 @@ class AdapterManifest:
         if not rows:
             raise ValueError("No adapters have computed centroids")
 
-        return np.vstack(rows).astype(np.float32), row_ids
+        matrix = np.vstack(rows).astype(np.float32)
+        self._cluster_matrix_cache = (matrix, row_ids)
+        return self._cluster_matrix_cache
 
     # -------------------------------------------------------------------------
     # Persistence
     # -------------------------------------------------------------------------
     
+    # Filename used for the sidecar `.npz` storing per-adapter
+    # `cluster_centroids` matrices when these are too large to inline as JSON.
+    CLUSTER_CENTROIDS_SIDECAR = "cluster_centroids.npz"
+
     def save(self, path: str | Path) -> None:
-        """Save manifest to JSON file.
-        
-        Includes centroid vectors as lists for JSON compatibility.
-        
+        """Save manifest to JSON file (and optional sidecar for cluster centroids).
+
+        - Single `centroid` vectors and small `cluster_centroids` lists stay
+          inside `manifest.json` for portability.
+        - When any adapter carries `cluster_centroids` we additionally write a
+          companion `cluster_centroids.npz` next to the manifest so per-chunk
+          anchors (potentially 10k+ rows × dim) don't bloat the JSON. The
+          manifest then references the sidecar via `num_cluster_centroids`.
+
         Args:
-            path: Output file path.
+            path: Output file path (e.g. `.../router_state/manifest.json`).
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        
+
+        # Decide whether we need a sidecar — only if at least one adapter has
+        # cluster centroids.
+        sidecar_payload: dict[str, np.ndarray] = {}
+        for adapter_id, entry in self._entries.items():
+            if entry.cluster_centroids:
+                sidecar_payload[adapter_id] = np.vstack(entry.cluster_centroids).astype(np.float32)
+
         data = {
-            "version": "1.0",
+            "version": "1.1",
             "created_at": datetime.now().isoformat(),
             "num_adapters": self.num_adapters,
+            "cluster_centroids_sidecar": (
+                self.CLUSTER_CENTROIDS_SIDECAR if sidecar_payload else None
+            ),
             "adapters": {
-                adapter_id: entry.to_dict(include_centroid=True)
+                adapter_id: entry.to_dict(
+                    include_centroid=True,
+                    inline_clusters=False,
+                )
                 for adapter_id, entry in self._entries.items()
             },
         }
-        
+
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
-        
+
+        if sidecar_payload:
+            sidecar_path = path.parent / self.CLUSTER_CENTROIDS_SIDECAR
+            np.savez_compressed(sidecar_path, **sidecar_payload)
+            logger.info(
+                f"Saved cluster centroids sidecar with "
+                f"{len(sidecar_payload)} adapters to {sidecar_path}"
+            )
+
         logger.info(f"Saved manifest with {self.num_adapters} adapters to {path}")
-    
+
     @classmethod
     def load(cls, path: str | Path) -> AdapterManifest:
-        """Load manifest from JSON file.
-        
+        """Load manifest from JSON file (and optional cluster-centroid sidecar).
+
         Args:
-            path: Input file path.
-            
+            path: Input file path (e.g. `.../router_state/manifest.json`).
+
         Returns:
             Loaded AdapterManifest.
         """
         path = Path(path)
-        
+
         with open(path, "r") as f:
             data = json.load(f)
-        
+
         manifest = cls()
-        
+
         for adapter_id, entry_data in data.get("adapters", {}).items():
             entry = AdapterEntry.from_dict(entry_data)
             manifest._entries[adapter_id] = entry
-        
+
+        # Sidecar load (per-chunk anchors offloaded from JSON for size).
+        sidecar_name = data.get("cluster_centroids_sidecar")
+        sidecar_path = path.parent / sidecar_name if sidecar_name else None
+        if sidecar_path and sidecar_path.exists():
+            try:
+                with np.load(sidecar_path) as npz:
+                    for adapter_id in npz.files:
+                        if adapter_id not in manifest._entries:
+                            logger.warning(
+                                f"Sidecar contains unknown adapter '{adapter_id}', skipping"
+                            )
+                            continue
+                        matrix = np.asarray(npz[adapter_id], dtype=np.float32)
+                        manifest._entries[adapter_id].cluster_centroids = [
+                            matrix[i] for i in range(matrix.shape[0])
+                        ]
+                logger.info(
+                    f"Loaded cluster centroids sidecar from {sidecar_path}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to load cluster centroids sidecar: {e}")
+
         logger.info(f"Loaded manifest with {manifest.num_adapters} adapters from {path}")
-        
+
         return manifest
     
     # -------------------------------------------------------------------------

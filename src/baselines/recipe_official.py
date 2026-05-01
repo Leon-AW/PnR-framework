@@ -210,3 +210,37 @@ class RECIPEOfficialInference:
             prompt_retrieved=prompt_retrieved,
             n_edits_in_repo=max(0, len(self._editor.knowledge_base_nl) - 1),
         )
+
+    # ------------------------------------------------------------------
+    # Log-probability scoring (ROME / MEMIT-style ESR)
+    # ------------------------------------------------------------------
+
+    def score_targets(self, query: str, targets: list[str]) -> dict[str, float]:
+        """Score targets via teacher-forcing on the post-edit RECIPE model.
+
+        RECIPE injects continuous prompts into the embedding stream; the
+        same hooks are active during a forward pass, so feeding
+        ``prompt + target`` through ``model(...)`` gives the post-edit
+        log-probability — the metric ROME / MEMIT report.
+
+        Uses the raw query (no chat template) to match the completion-style
+        prompts RECIPE was trained with — see the comment in
+        :meth:`generate` for the rationale.
+        """
+        from src.inference import score_target_logprob
+
+        self._ensure_loaded()
+        assert self._editor is not None
+        assert self._tokenizer is not None
+
+        model = self._editor.model
+        return {
+            t: score_target_logprob(
+                model=model,
+                tokenizer=self._tokenizer,
+                prompt=query,
+                target=t,
+                use_gpu=self.use_gpu,
+            )
+            for t in targets
+        }

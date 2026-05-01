@@ -106,10 +106,10 @@ class LoRARAGInference:
     # ------------------------------------------------------------------
 
     def _ensure_loaded(self) -> None:
-        if self._pipeline is not None:
-            return
-        self._build_pipeline()
-        self._build_index()
+        if self._pipeline is None:
+            self._build_pipeline()
+        if self._encoder is None or self._index is None:
+            self._build_index()
 
     def _build_pipeline(self) -> None:
         """Initialise PatchAndRouteInference with the monolithic adapter."""
@@ -149,7 +149,10 @@ class LoRARAGInference:
             raise FileNotFoundError(f"QA pairs file not found: {self.qa_pairs_path}")
 
         with open(self.qa_pairs_path) as f:
-            raw = json.load(f)
+            if self.qa_pairs_path.suffix == ".jsonl":
+                raw = [json.loads(line) for line in f if line.strip()]
+            else:
+                raw = json.load(f)
 
         self._qa_pairs = [
             {"question": item["question"], "answer": item["answer"]}
@@ -240,4 +243,25 @@ class LoRARAGInference:
             response=result.response,
             n_retrieved=len(retrieved),
             retrieved_questions=[p["question"] for p in retrieved],
+        )
+
+    # ------------------------------------------------------------------
+    # Log-probability scoring
+    # ------------------------------------------------------------------
+
+    def score_targets(self, query: str, targets: list[str]) -> dict[str, float]:
+        """Compute log P(target | augmented_prompt) under the monolithic LoRA.
+
+        Uses the same retrieval-augmented prompt as ``generate`` so the
+        log-prob view reflects the *full* LoRA+RAG system, not just the
+        bare adapter.
+        """
+        self._ensure_loaded()
+        retrieved = self._retrieve(query)
+        context = self._format_context(retrieved)
+        augmented_query = f"{context}\n\nQuestion: {query}"
+        return self._pipeline.score_targets(
+            query=augmented_query,
+            targets=targets,
+            force_adapter=self.monolithic_adapter_path,
         )

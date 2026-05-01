@@ -247,3 +247,38 @@ class XLoRAInference:
                 break
 
         return XLoRAInferenceResult(response=response)
+
+    # -------------------------------------------------------------------------
+    # Log-probability scoring (ROME / MEMIT-style ESR)
+    # -------------------------------------------------------------------------
+
+    def score_targets(self, query: str, targets: list[str]) -> dict[str, float]:
+        """Score targets via teacher-forced log-probability on the X-LoRA model.
+
+        The X-LoRA classifier dynamically blends adapters per layer and per
+        token, so the post-edit distribution is fully encoded in
+        ``self._model``; teacher-forcing the target through the same
+        wrapped model gives a metric directly comparable to ROME / MEMIT.
+        """
+        from src.inference import score_target_logprob
+
+        self._ensure_loaded()
+
+        messages = [{"role": "user", "content": query}]
+        try:
+            prompt = self._tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception:
+            prompt = f"User: {query}\nAssistant:"
+
+        return {
+            t: score_target_logprob(
+                model=self._model,
+                tokenizer=self._tokenizer,
+                prompt=prompt,
+                target=t,
+                use_gpu=self.use_gpu,
+            )
+            for t in targets
+        }

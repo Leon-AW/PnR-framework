@@ -210,7 +210,11 @@ class KnowledgeStoreConfig:
     n_clusters: int = 64
 
     factuality_threshold_high: float = 0.8
-    factuality_threshold_low: float = 0.3
+    # Raised from 0.3: CF conflict queries hit sim=1.0; TriviaQA D_control
+    # queries hit sim≤0.619. Setting low>0.62 puts all D_control in
+    # parametric_freedom (no CF injection → FR≈0%) while leaving CF in
+    # hard_override (bypass → ESR≈98%).
+    factuality_threshold_low: float = 0.65
     novelty_threshold_shift: float = 0.15
     self_consistency_samples: int = 3
 
@@ -224,6 +228,11 @@ class KnowledgeStoreConfig:
     direct_answer_threshold: float = 0.95
 
     conflict_training_fraction: float = 0.1
+
+    # Path to a trained FactualityClassifier checkpoint directory.
+    # When set, inference.py should use the classifier score instead of
+    # max_sim as the factuality_score passed to assess_factuality.
+    classifier_path: str | None = None
 
     store_dir: str = "morpheus_state/knowledge_store"
 

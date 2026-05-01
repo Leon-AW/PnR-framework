@@ -5,7 +5,7 @@
 #SBATCH --nodelist=gruenau10
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=03:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=logs/triviaqa_dcontrol_%j.out
 #SBATCH --error=logs/triviaqa_dcontrol_%j.err
 
@@ -38,10 +38,10 @@ echo "======================================================================"
 
 python scripts/build_triviaqa_dcontrol.py \
     --output_path data/triviaqa_dcontrol.json \
-    --target 5000 \
-    --max_process 80000 \
-    --batch_size 8 \
-    --max_new_tokens 30
+    --target 1000 \
+    --max_process 10000 \
+    --batch_size 1 \
+    --max_new_tokens 32
 
 echo "======================================================================"
 echo "Finished : $(date)"
