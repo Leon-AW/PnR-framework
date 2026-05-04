@@ -31,58 +31,62 @@ RESULTS_DIR = REPO_ROOT / "eval_results"
 METHODS: list[dict[str, str | None]] = [
     {
         "name":         "Frozen Base",
-        "situated_qa":  "frozen_base",
+        # standardised SQA D_eval (1 000 train + D_control, May 2)
+        "situated_qa":  "frozen_base_sqa_deval",
         "counterfact":  "frozen_base_deval_v2",
         # "ait_qm":    None,
     },
     {
         "name":         "X-LoRA",
-        "situated_qa":  "xlora_v2",
+        # merged after job 352297 (cf_control) completed May 3
+        "situated_qa":  "xlora_sqa_deval",
         "counterfact":  "xlora_v3",
     },
     {
         "name":         "Parallel Orchestrator",
-        "situated_qa":  "parallel_orchestrator",
-        "counterfact":  "parallel_deval_v2",
+        "situated_qa":  "parallel_sqa_deval",
+        # logprob re-run (job 352301) adds TF-ESR; replaces parallel_deval_may2026 when complete
+        "counterfact":  "parallel_deval_logprob",
     },
     {
         "name":         "RECIPE",
-        "situated_qa":  "recipe_official_v4",
+        "situated_qa":  "recipe_sqa_deval",
         "counterfact":  "recipe_deval_v2",
     },
     {
         "name":         "Monolithic LoRA",
-        "situated_qa":  "monolithic",
+        "situated_qa":  "monolithic_sqa_deval",
         "counterfact":  "monolithic_deval_v2",
     },
     {
         "name":         "LoRA + RAG",
-        "situated_qa":  "lora_rag",
+        "situated_qa":  "lora_rag_sqa_deval",
         "counterfact":  "lora_rag_deval_v2",
     },
     {
         "name":         "PnR Routing",
-        "situated_qa":  "pnr",
-        "counterfact":  "pnr_deval_v2",
+        "situated_qa":  "pnr_sqa_deval",
+        # logprob re-run (job 352300) adds TF-ESR; replaces pnr_deval_stateless when complete
+        "counterfact":  "pnr_deval_logprob",
     },
     {
         "name":         "MORPHEUS (τ, bypass)",
-        "situated_qa":  "morpheus",
+        "situated_qa":  "morpheus_sqa_deval",
         "counterfact":  "morpheus_deval_v3",
     },
     {
         "name":         "MORPHEUS (τ, no-bypass)",
-        "situated_qa":  "morpheus",
+        "situated_qa":  "morpheus_sqa_deval",
         "counterfact":  "morpheus_nobypass_deval_v3",
     },
     {
         "name":         "MORPHEUS (clf, bypass)",
-        "situated_qa":  "morpheus",
+        "situated_qa":  "morpheus_sqa_deval",
         "counterfact":  "morpheus_clf_deval_v3",
     },
     {
         "name":         "MORPHEUS (clf, no-bypass)",
-        "situated_qa":  "morpheus",
+        "situated_qa":  "morpheus_sqa_deval",
         "counterfact":  "morpheus_clf_nobypass_deval_v3",
     },
 ]
@@ -106,15 +110,18 @@ def _get(d: Any, *keys: str, default=None) -> Any:
 def _extract_situated_qa(report: dict) -> dict[str, float | None]:
     s = report.get("summary", {})
     sp = report.get("by_split", {})
-    em = s.get("exact_match_overall", s.get("exact_match"))
-    f1 = s.get("f1_overall",          s.get("f1"))
+    # New standardised D_eval format: by_split has 'sqa_train' key.
+    # summary.exact_match_overall covers sqa_train+cf_control combined, so read
+    # the per-split entry instead.  Legacy format: fall back to summary fields.
+    if "sqa_train" in sp:
+        em = _get(sp, "sqa_train", "exact_match")
+        f1 = _get(sp, "sqa_train", "f1")
+    else:
+        em = s.get("exact_match_overall", s.get("exact_match"))
+        f1 = s.get("f1_overall",          s.get("f1"))
     return {
         "sqa_em":    em,
         "sqa_f1":    f1,
-        "sqa_base":  _get(sp, "base",          "exact_match"),
-        "sqa_temp":  _get(sp, "temporal",       "exact_match"),
-        "sqa_ind":   _get(sp, "geo_india",      "exact_match"),
-        "sqa_aus":   _get(sp, "geo_australia",  "exact_match"),
         "sqa_judge": _get(s,  "judge_accuracy_overall"),
     }
 
@@ -129,7 +136,8 @@ def _extract_counterfact(report: dict) -> dict[str, float | None]:
         ctrl = _get(sp, "cf_control",  "exact_match")
         return {
             "cf_esr":      esr,
-            "cf_logp_esr": None,
+            "cf_f1":       _get(sp, "cf_conflict", "f1"),
+            "cf_logp_esr": s.get("logprob_esr"),
             "cf_fr":       (1.0 - ctrl) if ctrl is not None else None,
             "cf_judge":    _get(sp, "cf_conflict", "judge_accuracy"),
             "sys_judge_ctrl": _get(sp, "cf_control", "judge_accuracy"),
@@ -137,6 +145,7 @@ def _extract_counterfact(report: dict) -> dict[str, float | None]:
 
     return {
         "cf_esr":         _get(s,  "esr"),
+        "cf_f1":          _get(sp, "cf_conflict", "f1"),
         "cf_logp_esr":    _get(s,  "logprob_esr"),
         "cf_fr":          _get(s,  "dcontrol_forgetting_rate"),
         "cf_judge":       _get(sp, "cf_conflict", "judge_accuracy"),
@@ -156,10 +165,6 @@ DATASETS: list[dict] = [
             # (header,     field,      align, min_width)
             ("EM",         "sqa_em",   ">", 6),
             ("F1",         "sqa_f1",   ">", 6),
-            ("Base",       "sqa_base", ">", 6),
-            ("Temporal",   "sqa_temp", ">", 8),
-            ("Geo India",  "sqa_ind",  ">", 9),
-            ("Geo Aus.",   "sqa_aus",  ">", 8),
             ("Judge",      "sqa_judge",">", 6),
         ],
         "extract": _extract_situated_qa,
@@ -169,6 +174,7 @@ DATASETS: list[dict] = [
         "label":   "CounterFact",
         "columns": [
             ("ESR (EM)",   "cf_esr",      ">", 8),
+            ("F1",         "cf_f1",       ">", 6),
             ("TF-ESR",     "cf_logp_esr", ">", 7),
             ("Judge CF",   "cf_judge",    ">", 9),
         ],

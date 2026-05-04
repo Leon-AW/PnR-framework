@@ -131,8 +131,16 @@ class EvalConfig:
     morpheus_classifier_path: str | None = None
     parallel_orchestrator: bool = False  # Use Parallel-Orchestrator architecture
     parallel_max_adapters: int = 5  # Max adapters for parallel execution
-    parallel_query_planner: str = "heuristic"  # "heuristic" or "llm"
+    # "similarity" (default, post-May-1): similarity-distribution rule;
+    # "keyword" (legacy heuristic, retained for ablation);
+    # "llm": classification via the frozen base.
+    parallel_query_planner: str = "similarity"
     parallel_synthesis_tokens: int = 512  # Max tokens for synthesis pass
+    # Sticky-adapter policy (Change 0). When False (default) PnR explicitly
+    # detaches the previously-loaded adapter on routing miss — the honest
+    # per-query state required for unbiased D_control. Set True to restore
+    # the legacy "warm-context" behaviour (kept as an ablation knob).
+    warm_context: bool = False
     recipe_official_checkpoint: str | None = None  # Path to official-repo RECIPE checkpoint file
     recipe_official_edits_path: str | None = None  # JSON file with edits for the official-RECIPE repo
     lora_rag_adapter: str | None = None  # Path to monolithic adapter for LoRA+RAG baseline
@@ -534,6 +542,7 @@ class EvalRunner:
             ParallelOrchestrator instance for multi-adapter parallel inference.
         """
         import torch
+        from src.eval.metrics import DEFAULT_SHORT_ANSWER_BOUNDARIES
         from src.inference import GenerationConfig
         from src.models.core import FrozenFoundationConfig, PatchAndRouteLLM, QuantizationType
         from src.routing import CentroidRouter, ParallelOrchestrator
@@ -570,10 +579,14 @@ class EvalRunner:
         llm = PatchAndRouteLLM(foundation_config=llm_config)
         llm.load_frozen_foundation()
 
+        # Explicit `stop_sequences` so this builder doesn't quietly diverge
+        # from `GenerationConfig`'s default if the dataclass default ever
+        # changes (Change 6 — defensive plumbing).
         gen_config = GenerationConfig(
             max_new_tokens=self.config.max_new_tokens,
             temperature=self.config.temperature,
             do_sample=self.config.do_sample,
+            stop_sequences=DEFAULT_SHORT_ANSWER_BOUNDARIES,
         )
 
         return ParallelOrchestrator(
@@ -584,6 +597,7 @@ class EvalRunner:
             max_adapters=self.config.parallel_max_adapters,
             synthesis_max_new_tokens=self.config.parallel_synthesis_tokens,
             use_gpu=use_gpu,
+            warm_context=self.config.warm_context,
         )
 
     def _build_pipeline(self):
@@ -603,6 +617,7 @@ class EvalRunner:
         if self.config.xlora_checkpoint:
             return self._build_xlora_pipeline()
         import torch
+        from src.eval.metrics import DEFAULT_SHORT_ANSWER_BOUNDARIES
         from src.inference import PatchAndRouteInference, GenerationConfig
         from src.models.core import QuantizationType
         from src.routing import CentroidRouter
@@ -637,11 +652,12 @@ class EvalRunner:
             else:
                 logger.warning(f"Checkpoints dir not found: {checkpoints_dir}")
 
-        # Build generation config
+        # Build generation config (Change 6: explicit stop_sequences)
         gen_config = GenerationConfig(
             max_new_tokens=self.config.max_new_tokens,
             temperature=self.config.temperature,
             do_sample=self.config.do_sample,
+            stop_sequences=DEFAULT_SHORT_ANSWER_BOUNDARIES,
         )
 
         # Build inference pipeline
@@ -651,6 +667,7 @@ class EvalRunner:
             quantization=quantization,
             generation_config=gen_config,
             use_gpu=use_gpu,
+            warm_context=self.config.warm_context,
         )
 
         return pipeline

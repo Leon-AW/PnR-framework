@@ -178,9 +178,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--parallel_planner",
         type=str,
-        choices=["heuristic", "llm"],
-        default="heuristic",
-        help="Query planner mode for the Parallel Orchestrator",
+        choices=["similarity", "keyword", "heuristic", "llm"],
+        default="similarity",
+        help=(
+            "Query planner mode for the Parallel Orchestrator. "
+            "'similarity' (default, post-May-1) uses the per-adapter τ "
+            "geometry to fire MULTI on overlap. 'keyword' is the legacy "
+            "regex heuristic (kept as ablation, alias 'heuristic'). "
+            "'llm' uses the frozen base for classification."
+        ),
+    )
+    parser.add_argument(
+        "--warm_context",
+        action="store_true",
+        help=(
+            "Keep the previously-loaded adapter attached when the router "
+            "returns no winner. Default OFF — gives an honest, per-query "
+            "stateless baseline (required for D_control 'any drop = "
+            "forgetting' to hold on split-sorted eval datasets). Pass to "
+            "reproduce the legacy sticky-adapter numbers."
+        ),
     )
     parser.add_argument(
         "--parallel_synth_tokens",
@@ -455,6 +472,7 @@ def main() -> None:
         output_dir=args.output_dir,
         use_llm_judge=args.use_llm_judge,
         compute_logprob=args.compute_logprob,
+        warm_context=args.warm_context,
     )
 
     logger.info(f"  Model: {config.model_id}")

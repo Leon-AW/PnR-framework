@@ -479,9 +479,10 @@ class PatchAndRouteInference:
         generation_config: GenerationConfig | None = None,
         similarity_threshold: float = 0.65,
         use_gpu: bool = True,
+        warm_context: bool = False,
     ) -> None:
         """Initialize the inference pipeline.
-        
+
         Args:
             model_id: HuggingFace model ID for the base LLM.
             router: Pre-initialized CentroidRouter (optional).
@@ -492,9 +493,17 @@ class PatchAndRouteInference:
             generation_config: Generation hyperparameters.
             similarity_threshold: Router similarity threshold.
             use_gpu: Whether to use GPU.
+            warm_context: When ``True`` keep the previously loaded adapter
+                attached if ``route()`` returns no winner (legacy behaviour
+                that creates a sticky-adapter benefit on split-sorted eval
+                sets). When ``False`` (default, post-May-1 honest baseline)
+                explicitly detach so every query is independently routed
+                against the frozen base — required for the D_control
+                "any drop = forgetting" guarantee to hold.
         """
         self.model_id = model_id
         self.use_gpu = use_gpu
+        self.warm_context = warm_context
         self.generation_config = generation_config or GenerationConfig()
         
         # Initialize router
@@ -612,17 +621,26 @@ class PatchAndRouteInference:
         # Step 1: Route query (unless skipped)
         if not skip_routing and not force_adapter:
             routing_result = self.router.route(query)
-            
+
             # Load winner adapter if found
             if routing_result.winner_path:
                 self._load_adapter(routing_result.winner_path)
                 adapter_loaded = routing_result.winner_adapter
                 retrieved_context = routing_result.retrieved_context
-                
+
                 logger.info(f"Routed to: {adapter_loaded}")
                 if routing_result.has_conflict:
                     logger.info(f"Conflict resolved, losers: {routing_result.loser_adapters}")
-        
+            elif not self.warm_context:
+                # Honest per-query routing: no winner ⇒ no adapter. Without
+                # this detach the previously loaded adapter persists and
+                # answers a query it was never routed to (the "sticky
+                # adapter" state-leak diagnosed May 1; see
+                # tasks/fix_parallel_orchestrator.md Change 0).
+                if self._llm is not None and self._llm.has_expert_attached:
+                    self._llm.detach_expert()
+                    self._current_adapter = None
+
         elif force_adapter:
             # Force specific adapter
             self._load_adapter(force_adapter)
@@ -701,6 +719,11 @@ class PatchAndRouteInference:
             if routing_result.winner_path:
                 self._load_adapter(routing_result.winner_path)
                 retrieved_context = routing_result.retrieved_context
+            elif not self.warm_context:
+                # Mirror generate(): honest per-query state when no winner.
+                if self._llm is not None and self._llm.has_expert_attached:
+                    self._llm.detach_expert()
+                    self._current_adapter = None
         elif force_adapter:
             self._load_adapter(force_adapter)
         elif skip_routing and self._llm and self._llm.has_expert_attached:

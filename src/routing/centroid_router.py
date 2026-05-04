@@ -700,85 +700,137 @@ class CentroidRouter(BaseRouter):
     # Core Routing Logic
     # -------------------------------------------------------------------------
     
-    def route(self, query: str, top_k: int = 3) -> RoutingResult:
+    def _score_adapters(
+        self,
+        query: str,
+        query_embedding: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, dict[str, float], dict[str, float]]:
+        """Single source of truth for cluster-flat similarity + per-adapter τ.
+
+        Used by both ``route()`` (PnR top-1 + Source-Replay) and the
+        ``ParallelOrchestrator`` (multi-adapter selection). Honours
+        ``manifest[adapter_id].metadata['similarity_threshold']`` per
+        adapter and falls back to ``self.similarity_threshold`` for the
+        adapters where calibration produced no clean separation.
+
+        The aggregation rule (max-per-adapter over per-chunk anchors) is
+        the v5 fix from roadmap TODO 7: a broad-domain adapter
+        (e.g. ``patch_cf_main`` covering ~20k diverse facts) wins as
+        soon as ANY of its training anchors matches the query, instead
+        of the mean centroid collapsing near origin.
+
+        Args:
+            query: User's input query (used iff ``query_embedding`` is None).
+            query_embedding: Optional pre-computed embedding to skip the
+                encoder pass — wired by callers that already embedded
+                the query (e.g. Parallel's ``score_targets`` plus
+                ``select_adapters`` in the same call).
+
+        Returns:
+            Tuple ``(query_embedding, sims, taus)`` where:
+
+            - ``query_embedding`` is the L2-normalised query vector.
+            - ``sims`` is ``adapter_id → max_i cos(query, anchor_i)`` for
+              every adapter that has at least one centroid; clamped
+              into ``[0, 1]`` to absorb float32 cosine landing at
+              ``1 + ε`` when the query coincides with a training
+              anchor (which happens by design when CF eval uses
+              training records).
+            - ``taus`` is ``adapter_id → calibrated_τ_or_global_fallback``
+              for every adapter in ``sims``.
+
+        Raises:
+            ValueError: when the manifest has no adapters with centroids.
+        """
+        if query_embedding is None:
+            query_embedding = self.compute_embedding(query)
+
+        centroids, row_adapter_ids = self._manifest.get_cluster_centroids_flat()
+        query_norm = query_embedding / np.linalg.norm(query_embedding)
+        row_similarities = np.dot(centroids, query_norm)
+
+        sims: dict[str, float] = {}
+        for adapter_id, sim in zip(row_adapter_ids, row_similarities):
+            s = float(np.clip(sim, 0.0, 1.0))
+            if s > sims.get(adapter_id, -np.inf):
+                sims[adapter_id] = s
+
+        taus: dict[str, float] = {}
+        for adapter_id in sims:
+            entry = self._manifest[adapter_id]
+            taus[adapter_id] = float(entry.metadata.get(
+                "similarity_threshold", self.similarity_threshold
+            ))
+
+        return query_embedding, sims, taus
+
+    def route(
+        self,
+        query: str,
+        top_k: int = 3,
+        query_embedding: np.ndarray | None = None,
+    ) -> RoutingResult:
         """Route a query to the appropriate adapter(s).
-        
+
         This is the main entry point for the Time-Aware Centroid Router.
-        
+
         Flow:
-        1. Embed query
-        2. Compute similarity to all adapter centroids
-        3. Filter matches above threshold
+        1. Embed query (skipped iff ``query_embedding`` is provided)
+        2. Compute similarity to all adapter centroids (per-chunk anchors,
+           max-per-adapter aggregation — see ``_score_adapters``)
+        3. Filter matches above per-adapter calibrated τ
         4. If conflict (multiple matches), resolve by timestamp
         5. Winner: Weight Loading, Losers: Source-Replay
-        
+
         Args:
             query: User's input query.
             top_k: Maximum adapters to consider.
-            
+            query_embedding: Optional pre-computed embedding so the
+                Parallel Orchestrator can share embedding work across
+                ``plan_query``, ``select_adapters``, and any subsequent
+                Source-Replay retrieval (Change 7 — embedding cache).
+
         Returns:
             RoutingResult with winner adapter and retrieved context.
         """
         logger.debug(f"Routing query: {query[:50]}...")
-        
-        # Step 1: Embed query
-        query_embedding = self.compute_embedding(query)
-        
-        # Step 2: Get all cluster centroids (flat matrix, one row per cluster;
-        # adapters with only a single mean centroid contribute one row)
+
         try:
-            centroids, row_adapter_ids = self._manifest.get_cluster_centroids_flat()
+            query_embedding, sims, taus = self._score_adapters(
+                query, query_embedding=query_embedding
+            )
         except ValueError:
             logger.warning("No adapters with centroids found")
+            embedded = (
+                query_embedding
+                if query_embedding is not None
+                else self.compute_embedding(query)
+            )
             return RoutingResult(
                 winner_adapter=None,
                 winner_path=None,
                 retrieved_context="",
                 all_matches=[],
-                query_embedding=query_embedding,
+                query_embedding=embedded,
                 has_conflict=False,
                 routing_strategy=RoutingStrategy.CENTROID,
             )
 
-        # Step 3: Compute similarities (cosine on normalized vectors = dot product).
-        # Row-level sims are per-cluster; we then aggregate max-per-adapter so a
-        # broad-domain adapter (e.g. patch_cf_main) wins as soon as ANY of its
-        # subdomain cluster centroids matches the query.
-        query_norm = query_embedding / np.linalg.norm(query_embedding)
-        row_similarities = np.dot(centroids, query_norm)
-
-        best_sim_per_adapter: dict[str, float] = {}
-        for adapter_id, sim in zip(row_adapter_ids, row_similarities):
-            # Clamp into [0, 1]: with per-chunk anchors a query may coincide
-            # exactly with a training anchor, and float32 cosine can land at
-            # 1 + ε (e.g. 1.0000001). `AdapterMatch.__post_init__` enforces
-            # the [0, 1] bound — without clamping the constructor raises.
-            s = float(np.clip(sim, 0.0, 1.0))
-            if s > best_sim_per_adapter.get(adapter_id, -np.inf):
-                best_sim_per_adapter[adapter_id] = s
-
-        # Step 4: Filter matches above threshold.
-        # Per-adapter calibrated thresholds (set by build_router_state.py from
-        # in-domain training similarities and a held-out OOD negative pool)
-        # take precedence over the global fallback. This is the core of the
-        # fix for CF FR=99.8%: TriviaQA queries no longer pass each adapter's
-        # individually calibrated bar even when their bare similarity beats
-        # the legacy 0.45 global cutoff.
-        matches = []
-        for adapter_id, sim in best_sim_per_adapter.items():
-            entry = self._manifest[adapter_id]
-            adapter_threshold = entry.metadata.get(
-                "similarity_threshold", self.similarity_threshold
+        # Filter by per-adapter calibrated τ (the core v5 fix for CF
+        # FR=99.8%: TriviaQA queries no longer pass each adapter's
+        # individually calibrated bar even when their bare similarity
+        # beats the legacy 0.45 global cutoff).
+        matches = [
+            AdapterMatch(
+                adapter_id=adapter_id,
+                similarity=sims[adapter_id],
+                timestamp=self._manifest[adapter_id].timestamp,
+                is_winner=False,
             )
-            if sim >= adapter_threshold:
-                matches.append(AdapterMatch(
-                    adapter_id=adapter_id,
-                    similarity=sim,
-                    timestamp=entry.timestamp,
-                    is_winner=False,
-                ))
-        
-        # Sort by similarity descending
+            for adapter_id in sims
+            if sims[adapter_id] >= taus[adapter_id]
+        ]
+
         matches.sort(key=lambda m: m.similarity, reverse=True)
         matches = matches[:top_k]
         
