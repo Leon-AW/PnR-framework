@@ -90,6 +90,9 @@ class CentroidRouter(BaseRouter):
         store_dir: str | Path | None = None,
         always_on_replay: bool = True,
         winner_replay_top_k: int = 3,
+        domain_classifier: "DomainClassifier | None" = None,
+        domain_confidence_threshold: float = 0.7,
+        domain_fallback_threshold: float = 0.30,
     ) -> None:
         """Initialize the Centroid Router.
 
@@ -116,6 +119,26 @@ class CentroidRouter(BaseRouter):
                 while the retrieved text supplies the exact token sequence.
             winner_replay_top_k: Number of chunks to retrieve from the
                 winner's index when `always_on_replay=True`.
+            domain_classifier: Optional Stage-1 gate (Phase 4 / NF-1 fix).
+                When supplied, ``route()`` first asks the classifier for a
+                {cf, sqa, ood_trivia} prediction. ``ood_trivia`` above
+                ``domain_confidence_threshold`` short-circuits to
+                ``<NONE>`` (frozen base). ``cf`` / ``sqa`` restrict the
+                candidate adapter set in Stage 2 by prefix
+                (``patch_cf_relfam_*`` vs ``base_v1`` /
+                ``patch_temp_2019_plus`` / ``patch_geo_*``). When None,
+                routing collapses to its pre-Phase-4 behaviour.
+            domain_confidence_threshold: Minimum top-class probability
+                required to act on a Stage-1 prediction. Below this, the
+                Stage-1 mask is ignored and Stage 2 considers all
+                adapters with the global fallback τ.
+            domain_fallback_threshold: Replacement value for the
+                similarity_threshold fallback when Stage 1 has produced a
+                confident in-domain class (``cf`` or ``sqa``). Lowered
+                from ``similarity_threshold`` (0.45-ish) to 0.30 because
+                the OOD class was already filtered out at Stage 1, so the
+                Stage-2 bar can be more permissive without re-introducing
+                FR. Per-adapter calibrated τ_i still wins where present.
         """
         super().__init__(strategy=RoutingStrategy.CENTROID)
 
@@ -128,6 +151,9 @@ class CentroidRouter(BaseRouter):
         self.store_dir = Path(store_dir) if store_dir else None
         self.always_on_replay = always_on_replay
         self.winner_replay_top_k = winner_replay_top_k
+        self._domain_classifier = domain_classifier
+        self._domain_confidence_threshold = domain_confidence_threshold
+        self._domain_fallback_threshold = domain_fallback_threshold
         
         # Initialize embedding model
         self._embedding_model = None
@@ -704,6 +730,8 @@ class CentroidRouter(BaseRouter):
         self,
         query: str,
         query_embedding: np.ndarray | None = None,
+        allowed_adapter_ids: set[str] | None = None,
+        fallback_threshold: float | None = None,
     ) -> tuple[np.ndarray, dict[str, float], dict[str, float]]:
         """Single source of truth for cluster-flat similarity + per-adapter τ.
 
@@ -725,6 +753,16 @@ class CentroidRouter(BaseRouter):
                 encoder pass — wired by callers that already embedded
                 the query (e.g. Parallel's ``score_targets`` plus
                 ``select_adapters`` in the same call).
+            allowed_adapter_ids: Optional Stage-1 mask (Phase 4). When
+                provided, both ``sims`` and ``taus`` are filtered down
+                to this set before being returned. ``ParallelOrchestrator``
+                must pass the same mask its router would produce, so
+                its candidate set respects the domain gate too.
+            fallback_threshold: Optional override for the per-adapter τ
+                fallback. ``route()`` passes the lowered
+                ``domain_fallback_threshold`` (0.30) here when Stage 1
+                has produced a confident in-domain class. Per-adapter
+                calibrated τ in the manifest still wins.
 
         Returns:
             Tuple ``(query_embedding, sims, taus)`` where:
@@ -755,14 +793,65 @@ class CentroidRouter(BaseRouter):
             if s > sims.get(adapter_id, -np.inf):
                 sims[adapter_id] = s
 
+        if allowed_adapter_ids is not None:
+            sims = {aid: s for aid, s in sims.items() if aid in allowed_adapter_ids}
+
         taus: dict[str, float] = {}
         for adapter_id in sims:
             entry = self._manifest[adapter_id]
-            taus[adapter_id] = float(entry.metadata.get(
+            metadata_tau = float(entry.metadata.get(
                 "similarity_threshold", self.similarity_threshold
             ))
+            if fallback_threshold is not None:
+                # Stage-1 (domain classifier) is confident; the per-adapter τ
+                # was calibrated to reject cross-domain (e.g. TriviaQA) noise
+                # which is now handled upstream by the classifier. Relax to
+                # the in-domain floor so within-domain queries that sit below
+                # the calibrated τ still route to their best-match adapter.
+                taus[adapter_id] = min(metadata_tau, fallback_threshold)
+            else:
+                taus[adapter_id] = metadata_tau
 
         return query_embedding, sims, taus
+
+    # -------------------------------------------------------------------------
+    # Stage-1 domain gate (Phase 4 / NF-1 fix)
+    # -------------------------------------------------------------------------
+
+    # Adapter-prefix → domain mapping. Matches the project's naming
+    # convention; `build_router_state.py` is the single source of truth
+    # for which adapters end up in the manifest.
+    _CF_ADAPTER_PREFIX = "patch_cf_relfam_"
+    _SQA_GEO_PREFIX = "patch_geo_"
+    _SQA_BASE_ADAPTERS = frozenset({"base_v1", "patch_temp_2019_plus"})
+
+    def _allowed_adapters_for_domain(self, domain: str) -> set[str] | None:
+        """Translate a Stage-1 domain class to the Stage-2 candidate set.
+
+        Returns ``None`` when no mask should be applied (unknown class or
+        confidence below threshold). Returns ``set()`` for ``ood_trivia``
+        only as a defensive default — ``route()`` short-circuits on
+        confident OOD predictions before calling this.
+        """
+        all_ids = set(self._manifest.adapters)
+        if domain == "cf":
+            return {a for a in all_ids if a.startswith(self._CF_ADAPTER_PREFIX)}
+        if domain == "sqa":
+            return {
+                a for a in all_ids
+                if a in self._SQA_BASE_ADAPTERS or a.startswith(self._SQA_GEO_PREFIX)
+            }
+        if domain == "ood_trivia":
+            return set()
+        return None
+
+    def _classify_domain(self, query: str) -> tuple[str, float, dict[str, float]] | None:
+        """Run the Stage-1 classifier; return (top_class, top_prob, all_probs)."""
+        if self._domain_classifier is None:
+            return None
+        probs = self._domain_classifier.predict_single(query)
+        top_class = max(probs, key=probs.get)
+        return top_class, probs[top_class], probs
 
     def route(
         self,
@@ -795,9 +884,48 @@ class CentroidRouter(BaseRouter):
         """
         logger.debug(f"Routing query: {query[:50]}...")
 
+        # Stage-1 domain gate (Phase 4 / NF-1 fix). Confident OOD predictions
+        # short-circuit to <NONE> so TriviaQA D_control queries cannot trigger
+        # any adapter. Confident in-domain predictions narrow Stage 2's
+        # candidate set and lower the τ fallback (per-adapter calibrated τ
+        # still wins).
+        allowed_adapter_ids: set[str] | None = None
+        fallback_threshold: float | None = None
+        stage1 = self._classify_domain(query)
+        if stage1 is not None:
+            top_class, top_prob, _all_probs = stage1
+            logger.debug(
+                f"Stage-1 domain={top_class} prob={top_prob:.3f} "
+                f"(thr={self._domain_confidence_threshold})"
+            )
+            if top_prob >= self._domain_confidence_threshold:
+                if top_class == "ood_trivia":
+                    logger.info(
+                        f"Stage-1 ood_trivia (prob={top_prob:.3f}) → routing to <NONE>"
+                    )
+                    embedded = (
+                        query_embedding
+                        if query_embedding is not None
+                        else self.compute_embedding(query)
+                    )
+                    return RoutingResult(
+                        winner_adapter=None,
+                        winner_path=None,
+                        retrieved_context="",
+                        all_matches=[],
+                        query_embedding=embedded,
+                        has_conflict=False,
+                        routing_strategy=RoutingStrategy.CENTROID,
+                    )
+                allowed_adapter_ids = self._allowed_adapters_for_domain(top_class)
+                fallback_threshold = self._domain_fallback_threshold
+
         try:
             query_embedding, sims, taus = self._score_adapters(
-                query, query_embedding=query_embedding
+                query,
+                query_embedding=query_embedding,
+                allowed_adapter_ids=allowed_adapter_ids,
+                fallback_threshold=fallback_threshold,
             )
         except ValueError:
             logger.warning("No adapters with centroids found")

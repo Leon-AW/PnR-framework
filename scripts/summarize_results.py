@@ -43,10 +43,16 @@ METHODS: list[dict[str, str | None]] = [
         "counterfact":  "xlora_v3",
     },
     {
-        "name":         "Parallel Orchestrator",
+        "name":         "Parallel (single-stage)",
         "situated_qa":  "parallel_sqa_deval",
-        # logprob re-run (job 352301) adds TF-ESR; replaces parallel_deval_may2026 when complete
+        # logprob re-run (job 352338, May 4): ESR=15.7%, TF-ESR=52.8%, FR=8.5%
         "counterfact":  "parallel_deval_logprob",
+    },
+    {
+        # Phase 5 (May 12): 6 patch_cf_relfam_* clusters + domain classifier Stage-1 gate
+        "name":         "Parallel (multi-expert + 2-stage)",
+        "situated_qa":  "parallel_phase5_sqa_deval",
+        "counterfact":  "parallel_phase5_cf_deval",
     },
     {
         "name":         "RECIPE",
@@ -64,10 +70,16 @@ METHODS: list[dict[str, str | None]] = [
         "counterfact":  "lora_rag_deval_v2",
     },
     {
-        "name":         "PnR Routing",
+        "name":         "PnR Routing (single-stage)",
         "situated_qa":  "pnr_sqa_deval",
-        # logprob re-run (job 352300) adds TF-ESR; replaces pnr_deval_stateless when complete
+        # logprob re-run (job 352307, May 4): ESR=17.2%, TF-ESR=53.2%, FR=8.2%
         "counterfact":  "pnr_deval_logprob",
+    },
+    {
+        # Phase 5 (May 12): 6 patch_cf_relfam_* clusters + domain classifier Stage-1 gate
+        "name":         "PnR Routing (multi-expert + 2-stage)",
+        "situated_qa":  "pnr_phase5_sqa_deval",
+        "counterfact":  "pnr_phase5_cf_deval",
     },
     {
         "name":         "MORPHEUS (τ, bypass)",
@@ -110,19 +122,20 @@ def _get(d: Any, *keys: str, default=None) -> Any:
 def _extract_situated_qa(report: dict) -> dict[str, float | None]:
     s = report.get("summary", {})
     sp = report.get("by_split", {})
-    # New standardised D_eval format: by_split has 'sqa_train' key.
-    # summary.exact_match_overall covers sqa_train+cf_control combined, so read
-    # the per-split entry instead.  Legacy format: fall back to summary fields.
+    # Standardised D_eval (sqa_train + cf_control): per-split entry is canonical;
+    # summary.exact_match_overall conflates with cf_control's near-perfect EM and
+    # summary.judge_accuracy_overall conflates with cf_control's ~98 % FR-probe.
+    # Legacy SQA-only runs (no by_split) fall back to summary fields.
     if "sqa_train" in sp:
-        em = _get(sp, "sqa_train", "exact_match")
-        f1 = _get(sp, "sqa_train", "f1")
-    else:
-        em = s.get("exact_match_overall", s.get("exact_match"))
-        f1 = s.get("f1_overall",          s.get("f1"))
+        return {
+            "sqa_em":    _get(sp, "sqa_train", "exact_match"),
+            "sqa_f1":    _get(sp, "sqa_train", "f1"),
+            "sqa_judge": _get(sp, "sqa_train", "judge_accuracy"),
+        }
     return {
-        "sqa_em":    em,
-        "sqa_f1":    f1,
-        "sqa_judge": _get(s,  "judge_accuracy_overall"),
+        "sqa_em":    s.get("exact_match_overall", s.get("exact_match")),
+        "sqa_f1":    s.get("f1_overall",          s.get("f1")),
+        "sqa_judge": s.get("judge_accuracy_overall"),
     }
 
 
@@ -130,24 +143,23 @@ def _extract_counterfact(report: dict) -> dict[str, float | None]:
     s  = report.get("summary", {})
     sp = report.get("by_split", {})
 
-    # xlora_v3 merged format has no esr/dcontrol_forgetting_rate keys
-    if "esr" not in s and "exact_match" in s:
-        esr  = _get(sp, "cf_conflict", "exact_match")
-        ctrl = _get(sp, "cf_control",  "exact_match")
-        return {
-            "cf_esr":      esr,
-            "cf_f1":       _get(sp, "cf_conflict", "f1"),
-            "cf_logp_esr": s.get("logprob_esr"),
-            "cf_fr":       (1.0 - ctrl) if ctrl is not None else None,
-            "cf_judge":    _get(sp, "cf_conflict", "judge_accuracy"),
-            "sys_judge_ctrl": _get(sp, "cf_control", "judge_accuracy"),
-        }
+    # by_split.cf_conflict is canonical for ESR/F1/judge: it isolates the
+    # conflict split from the cf_control FR probe.  summary.esr is unreliable
+    # for newer runs (Phase 5 records 0.0 in CF runs even when cf_conflict EM
+    # is 30 %+), so prefer the by-split entry whenever present.  Fall back to
+    # summary fields for legacy reports without cf_conflict.
+    esr  = _get(sp, "cf_conflict", "exact_match", default=_get(s, "esr"))
+    ctrl = _get(sp, "cf_control",  "exact_match")
+    cf_fr = _get(s, "dcontrol_forgetting_rate")
+    if cf_fr is None and ctrl is not None:
+        cf_fr = 1.0 - ctrl
 
     return {
-        "cf_esr":         _get(s,  "esr"),
+        "cf_esr":         esr,
         "cf_f1":          _get(sp, "cf_conflict", "f1"),
-        "cf_logp_esr":    _get(s,  "logprob_esr"),
-        "cf_fr":          _get(s,  "dcontrol_forgetting_rate"),
+        "cf_logp_esr":    _get(sp, "cf_conflict", "logprob_esr",
+                                default=_get(s, "logprob_esr")),
+        "cf_fr":          cf_fr,
         "cf_judge":       _get(sp, "cf_conflict", "judge_accuracy"),
         "sys_judge_ctrl": _get(sp, "cf_control",  "judge_accuracy"),
     }
@@ -246,7 +258,7 @@ def pct(v: Any, decimals: int = 1) -> str:
 
 
 def _all_columns() -> list[tuple]:
-    cols = [("Method", "name", "<", 28)]
+    cols = [("Method", "name", "<", 38)]
     for ds in DATASETS:
         cols.extend(ds["columns"])
     cols.extend(SYSTEM_COLUMNS)
@@ -256,7 +268,7 @@ def _all_columns() -> list[tuple]:
 def _group_headers() -> str:
     """Return a markdown comment-style group header line."""
     # Method column
-    parts = ["Method" + " " * (28 - len("Method"))]
+    parts = ["Method" + " " * (38 - len("Method"))]
     for ds in DATASETS:
         total_w = sum(max(c[3], len(c[0])) + 3 for c in ds["columns"]) - 3
         label = ds["label"]

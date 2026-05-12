@@ -160,6 +160,22 @@ class EvalConfig:
     #   - logprob_esr  (cf_conflict only, gold > target_true rate)
     # See docs/roadmap.md §"Architecture Improvement TODOs" for context.
     compute_logprob: bool = False
+    # Phase 4 — Stage-1 domain classifier checkpoint (3-class: cf, sqa,
+    # ood_trivia). When provided and loadable, the CentroidRouter and
+    # ParallelOrchestrator gate routing on the classifier's prediction:
+    # confident OOD → frozen base; confident CF/SQA → mask Stage 2 to
+    # the in-domain adapter pool. Closes NF-1 (routing_acc=0 on SQA).
+    # Graceful fallback: missing path or failed load logs a warning and
+    # eval proceeds without Stage-1 (pre-Phase-4 behaviour).
+    domain_classifier_path: str | None = None
+    # Confidence threshold for acting on a Stage-1 prediction. Below this,
+    # the Stage-1 mask is ignored and Stage 2 considers all adapters.
+    domain_confidence_threshold: float = 0.7
+    # Replacement value for the per-adapter τ fallback when Stage 1 is
+    # active (CF/SQA class with confident probability). Lowered from
+    # `similarity_threshold` because OOD has already been filtered out.
+    # Per-adapter calibrated τ in the manifest still wins.
+    domain_fallback_threshold: float = 0.30
 
 
 # =============================================================================
@@ -535,6 +551,40 @@ class EvalRunner:
 
         return pipeline
 
+    def _attach_domain_classifier(self, router) -> None:
+        """Phase 4 — load the Stage-1 domain classifier and bind it to ``router``.
+
+        No-op when ``self.config.domain_classifier_path`` is None. Failures
+        (missing path, malformed checkpoint) downgrade to a warning so eval
+        can still run with pre-Phase-4 routing — the FR/ESR numbers will
+        just reflect that NF-1 is unfixed for that run.
+        """
+        path = self.config.domain_classifier_path
+        if not path:
+            return
+        if not Path(path).exists():
+            logger.warning(
+                f"--domain_classifier_path {path} does not exist; skipping Stage-1."
+            )
+            return
+        try:
+            from src.routing.domain_classifier import DomainClassifier
+            classifier = DomainClassifier.load(path, device="auto")
+        except Exception as e:
+            logger.warning(
+                f"Failed to load domain classifier from {path}: {e}. "
+                "Continuing without Stage-1 — NF-1 mitigation is OFF for this run."
+            )
+            return
+        router._domain_classifier = classifier
+        router._domain_confidence_threshold = self.config.domain_confidence_threshold
+        router._domain_fallback_threshold = self.config.domain_fallback_threshold
+        logger.info(
+            f"Stage-1 domain classifier attached from {path} "
+            f"(conf_thr={self.config.domain_confidence_threshold}, "
+            f"fallback_thr={self.config.domain_fallback_threshold})"
+        )
+
     def _build_parallel_pipeline(self):
         """Build a ParallelOrchestrator pipeline.
 
@@ -569,6 +619,8 @@ class EvalRunner:
             if checkpoints_dir.exists():
                 n_registered = router.register_from_checkpoints(str(checkpoints_dir))
                 logger.info(f"Registered {n_registered} adapters from {checkpoints_dir}")
+
+        self._attach_domain_classifier(router)
 
         # Build PatchAndRouteLLM
         llm_config = FrozenFoundationConfig(
@@ -651,6 +703,8 @@ class EvalRunner:
                 logger.info(f"Registered {n_registered} adapters from {checkpoints_dir}")
             else:
                 logger.warning(f"Checkpoints dir not found: {checkpoints_dir}")
+
+        self._attach_domain_classifier(router)
 
         # Build generation config (Change 6: explicit stop_sequences)
         gen_config = GenerationConfig(

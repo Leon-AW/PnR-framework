@@ -95,22 +95,28 @@ GEO_ADAPTERS = {
 }
 
 # Adapters to skip (not part of the routing pool).
-# patch_cf_0..5 are the descoped KMeans cluster adapters from the original
-# 6-cluster CF design (see Phase 4 of docs/roadmap.md). The current thesis
-# uses the single `patch_cf_main` adapter; the cluster adapters are kept on
-# disk for ablations but must NOT be registered in the routing manifest —
-# they would otherwise duplicate the CF anchor block (each cluster reads the
-# same `data/counterfact_train.jsonl`) and split CF routing across stale
-# checkpoints.
+# The current CF routing pool is the six `patch_cf_relfam_{0..5}` adapters
+# (one per Wikidata relation-family cluster). The legacy single-expert
+# `patch_cf_main` adapter and the descoped KMeans cluster adapters are kept
+# on disk for ablations but must NOT be registered in the routing manifest —
+# they would either duplicate the CF anchor block (main + relfam read the
+# same training distribution) or split CF routing across stale checkpoints
+# (kmeans clusters were superseded by relfam).
+# NOTE: the KMeans cluster checkpoints have `"adapter_name": "patch_cf_{i}"`
+# in their training_config.json (legacy naming) even though the on-disk
+# directories are `patch_cf_kmeans_{i}`. The manifest registers them under
+# the training_config name, so the legacy ids are what we must skip.
 SKIP_ADAPTERS = {
     "monolithic_v1",
     "xlora_baseline",
+    "patch_cf_main",
     "patch_cf_0",
     "patch_cf_1",
     "patch_cf_2",
     "patch_cf_3",
     "patch_cf_4",
     "patch_cf_5",
+    "domain_classifier",
 }
 
 
@@ -462,6 +468,19 @@ def main() -> None:
                 country = GEO_ADAPTERS[adapter_id]
                 stream = loader.get_geo_patch_stream(country)
                 samples = collect_sqa_samples(stream, args.max_samples)
+
+            elif adapter_id.startswith("patch_cf_relfam_"):
+                cluster_idx = adapter_id.rsplit("_", 1)[-1]
+                relfam_path = Path("data") / f"counterfact_relfam_{cluster_idx}.jsonl"
+                if not relfam_path.exists():
+                    logger.error(
+                        f"  Per-cluster CF data file not found: {relfam_path} — "
+                        f"build it with scripts/build_counterfact_relation_clusters.py. "
+                        f"Skipping {adapter_id}."
+                    )
+                    continue
+                samples = collect_cf_samples(relfam_path, args.max_samples)
+                logger.info(f"  Source: {relfam_path} ({len(samples)} CF samples)")
 
             elif adapter_id.startswith("patch_cf"):
                 if not cf_data_path.exists():

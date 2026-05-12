@@ -92,6 +92,7 @@ def probe_route(router: CentroidRouter, examples: dict[str, list[str]]) -> None:
         winners: dict[str, int] = {}
         cf_sims: list[float | None] = []
         for q in queries:
+            stage1 = router._classify_domain(q) if router._domain_classifier is not None else None
             result = router.route(q)
             winner = result.winner_adapter or "<NONE>"
             winners[winner] = winners.get(winner, 0) + 1
@@ -105,10 +106,10 @@ def probe_route(router: CentroidRouter, examples: dict[str, list[str]]) -> None:
                 None,
             )
             cf_sims.append(cf_sim)
+            s1_str = f"{stage1[0]}({stage1[1]:.2f})" if stage1 else "—"
             print(
-                f"  q={q[:60]:<60s} → winner={winner:25s}  "
-                f"sim={sim if sim is None else f'{sim:.3f}'}  "
-                f"cf_sim={cf_sim if cf_sim is None else f'{cf_sim:.3f}'}"
+                f"  q={q[:55]:<55s} S1={s1_str:18s} → winner={winner:25s}  "
+                f"sim={sim if sim is None else f'{sim:.3f}'}"
             )
         print()
         print(f"  Winner distribution: {winners}")
@@ -245,6 +246,25 @@ def main() -> None:
         default=0.45,
         help="Global fallback τ; per-adapter calibrated τ takes precedence.",
     )
+    parser.add_argument(
+        "--domain_classifier_path",
+        default=None,
+        help="Optional path to the Phase 4 Stage-1 domain classifier checkpoint. "
+             "If set, OOD queries return winner=None and CF/SQA queries are "
+             "restricted to the corresponding adapter pool.",
+    )
+    parser.add_argument(
+        "--domain_confidence_threshold",
+        type=float,
+        default=0.7,
+        help="Min softmax prob to act on the Stage-1 decision.",
+    )
+    parser.add_argument(
+        "--domain_fallback_threshold",
+        type=float,
+        default=0.30,
+        help="Per-adapter τ override when Stage-1 narrows the candidate set.",
+    )
     parser.add_argument("--n", type=int, default=10, help="Queries per category.")
     args = parser.parse_args()
 
@@ -261,7 +281,19 @@ def main() -> None:
         similarity_threshold=args.similarity_threshold,
         use_gpu=False,
     )
-    print(f"Loaded {len(router.get_registered_adapters())} adapters\n")
+    print(f"Loaded {len(router.get_registered_adapters())} adapters")
+
+    if args.domain_classifier_path:
+        from src.routing.domain_classifier import DomainClassifier
+        clf = DomainClassifier.load(args.domain_classifier_path, device="cpu")
+        router._domain_classifier = clf
+        router._domain_confidence_threshold = args.domain_confidence_threshold
+        router._domain_fallback_threshold = args.domain_fallback_threshold
+        print(
+            f"Stage-1 classifier attached (conf_thr={args.domain_confidence_threshold}, "
+            f"fallback_thr={args.domain_fallback_threshold})"
+        )
+    print()
     for aid in router.get_registered_adapters():
         entry = router._manifest[aid]
         tau = entry.metadata.get("similarity_threshold", "n/a")

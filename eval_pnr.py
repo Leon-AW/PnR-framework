@@ -110,6 +110,37 @@ def parse_args() -> argparse.Namespace:
         help="Router similarity threshold",
     )
     parser.add_argument(
+        "--domain_classifier_path",
+        type=str,
+        default=None,
+        help=(
+            "Phase 4 — path to a trained 3-class domain classifier "
+            "(cf / sqa / ood_trivia). When provided, the CentroidRouter and "
+            "ParallelOrchestrator gate routing on the classifier prediction "
+            "(closes NF-1: SQA routing_acc=0). Missing path or failed load "
+            "downgrades to a warning and runs without Stage-1."
+        ),
+    )
+    parser.add_argument(
+        "--domain_confidence_threshold",
+        type=float,
+        default=0.7,
+        help=(
+            "Minimum top-class probability required to act on a Stage-1 "
+            "prediction. Below this, the Stage-1 mask is ignored."
+        ),
+    )
+    parser.add_argument(
+        "--domain_fallback_threshold",
+        type=float,
+        default=0.30,
+        help=(
+            "Replacement value for the per-adapter τ fallback when Stage 1 "
+            "produces a confident in-domain class. Per-adapter calibrated τ "
+            "in the manifest still wins."
+        ),
+    )
+    parser.add_argument(
         "--quantization",
         type=str,
         choices=["none", "int8", "int4"],
@@ -473,6 +504,9 @@ def main() -> None:
         use_llm_judge=args.use_llm_judge,
         compute_logprob=args.compute_logprob,
         warm_context=args.warm_context,
+        domain_classifier_path=args.domain_classifier_path,
+        domain_confidence_threshold=args.domain_confidence_threshold,
+        domain_fallback_threshold=args.domain_fallback_threshold,
     )
 
     logger.info(f"  Model: {config.model_id}")

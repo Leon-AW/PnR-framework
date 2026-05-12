@@ -333,6 +333,8 @@ class ParallelOrchestrator:
         self,
         query: str,
         query_embedding: np.ndarray | None = None,
+        allowed_adapter_ids: set[str] | None = None,
+        fallback_threshold: float | None = None,
     ) -> QueryPlan:
         """Analyze a query to determine the adapter selection strategy.
 
@@ -340,6 +342,12 @@ class ParallelOrchestrator:
             query: User's input query.
             query_embedding: Optional pre-computed embedding (Change 7
                 cache) — passed straight through to the similarity planner.
+            allowed_adapter_ids: Optional Stage-1 mask (Phase 4); when
+                supplied, the planner only sees the in-domain adapter
+                subset, so MULTI/BROAD plans don't get inflated by
+                cross-domain false positives.
+            fallback_threshold: Optional override for the per-adapter τ
+                fallback (Phase 4 lowered τ inside an active domain).
 
         Returns:
             QueryPlan with plan type and reasoning.
@@ -347,13 +355,25 @@ class ParallelOrchestrator:
         if self.query_planner_mode == "llm":
             return self._plan_query_llm(query)
         if self.query_planner_mode in ("keyword", "heuristic"):
-            return self._plan_query_keyword(query, query_embedding=query_embedding)
-        return self._plan_query_similarity(query, query_embedding=query_embedding)
+            return self._plan_query_keyword(
+                query,
+                query_embedding=query_embedding,
+                allowed_adapter_ids=allowed_adapter_ids,
+                fallback_threshold=fallback_threshold,
+            )
+        return self._plan_query_similarity(
+            query,
+            query_embedding=query_embedding,
+            allowed_adapter_ids=allowed_adapter_ids,
+            fallback_threshold=fallback_threshold,
+        )
 
     def _plan_query_similarity(
         self,
         query: str,
         query_embedding: np.ndarray | None = None,
+        allowed_adapter_ids: set[str] | None = None,
+        fallback_threshold: float | None = None,
     ) -> QueryPlan:
         """Default planner — pure similarity geometry (no keyword regex).
 
@@ -376,7 +396,10 @@ class ParallelOrchestrator:
         """
         try:
             _, sims, taus = self.router._score_adapters(
-                query, query_embedding=query_embedding,
+                query,
+                query_embedding=query_embedding,
+                allowed_adapter_ids=allowed_adapter_ids,
+                fallback_threshold=fallback_threshold,
             )
         except (ValueError, RuntimeError):
             return QueryPlan(
@@ -438,6 +461,8 @@ class ParallelOrchestrator:
         self,
         query: str,
         query_embedding: np.ndarray | None = None,
+        allowed_adapter_ids: set[str] | None = None,
+        fallback_threshold: float | None = None,
     ) -> QueryPlan:
         """Legacy keyword + similarity-distribution planner (kept for ablation).
 
@@ -452,7 +477,10 @@ class ParallelOrchestrator:
 
         try:
             _, sims, taus = self.router._score_adapters(
-                query, query_embedding=query_embedding,
+                query,
+                query_embedding=query_embedding,
+                allowed_adapter_ids=allowed_adapter_ids,
+                fallback_threshold=fallback_threshold,
             )
         except (ValueError, RuntimeError):
             sims, taus = {}, {}
@@ -562,6 +590,8 @@ class ParallelOrchestrator:
         query: str,
         plan: QueryPlan,
         query_embedding: np.ndarray | None = None,
+        allowed_adapter_ids: set[str] | None = None,
+        fallback_threshold: float | None = None,
     ) -> list[AdapterMatch]:
         """Select adapters based on query similarity and plan type.
 
@@ -574,13 +604,21 @@ class ParallelOrchestrator:
             query: User's input query.
             plan: The query plan from ``plan_query``.
             query_embedding: Optional pre-computed embedding (Change 7).
+            allowed_adapter_ids: Optional Stage-1 mask (Phase 4) — keeps
+                Parallel from picking SQA-domain adapters for a CF
+                query (and vice versa) when the domain class is known.
+            fallback_threshold: Optional override for the per-adapter τ
+                fallback (Phase 4 lowered τ inside an active domain).
 
         Returns:
             List of AdapterMatch objects for parallel execution.
         """
         try:
             _, sims, taus = self.router._score_adapters(
-                query, query_embedding=query_embedding,
+                query,
+                query_embedding=query_embedding,
+                allowed_adapter_ids=allowed_adapter_ids,
+                fallback_threshold=fallback_threshold,
             )
         except (ValueError, RuntimeError):
             logger.warning("No adapters with centroids available")
@@ -919,10 +957,55 @@ class ParallelOrchestrator:
         # Embed once, reuse across plan/select/execute/build (Change 7).
         query_embedding = self.router.compute_embedding(query)
 
-        plan = self.plan_query(query, query_embedding=query_embedding)
+        # Stage-1 domain gate (Phase 4 / NF-1). The orchestrator must apply
+        # the same mask the underlying CentroidRouter would, otherwise its
+        # Parallel path re-introduces the cross-domain false-positive
+        # selection that gives SQA queries CF adapters as winners.
+        allowed_adapter_ids: set[str] | None = None
+        fallback_threshold: float | None = None
+        stage1 = self.router._classify_domain(query)
+        if stage1 is not None:
+            top_class, top_prob, _all_probs = stage1
+            logger.info(
+                f"  Stage-1 domain={top_class} prob={top_prob:.3f} "
+                f"(thr={self.router._domain_confidence_threshold})"
+            )
+            if top_prob >= self.router._domain_confidence_threshold:
+                if top_class == "ood_trivia":
+                    logger.info(
+                        f"  Stage-1 ood_trivia (prob={top_prob:.3f}) → base-only"
+                    )
+                    return self._generate_base_only(
+                        query,
+                        QueryPlan(
+                            plan_type=QueryPlanType.SINGLE_LATEST,
+                            selected_adapters=[],
+                            reasoning=(
+                                f"Stage-1 ood_trivia "
+                                f"(prob={top_prob:.3f} ≥ "
+                                f"{self.router._domain_confidence_threshold})"
+                            ),
+                        ),
+                        query_embedding,
+                    )
+                allowed_adapter_ids = self.router._allowed_adapters_for_domain(top_class)
+                fallback_threshold = self.router._domain_fallback_threshold
+
+        plan = self.plan_query(
+            query,
+            query_embedding=query_embedding,
+            allowed_adapter_ids=allowed_adapter_ids,
+            fallback_threshold=fallback_threshold,
+        )
         logger.info(f"  Plan: {plan.plan_type.value} — {plan.reasoning}")
 
-        selected = self.select_adapters(query, plan, query_embedding=query_embedding)
+        selected = self.select_adapters(
+            query,
+            plan,
+            query_embedding=query_embedding,
+            allowed_adapter_ids=allowed_adapter_ids,
+            fallback_threshold=fallback_threshold,
+        )
         plan.selected_adapters = selected
 
         if not selected:
