@@ -28,6 +28,7 @@ from .dataset import (
     KNOWN_GEO_ADAPTERS,
     build_counterfact_conflict_dataset,
     build_local_json_dataset,
+    build_qm_conflict_dataset,
     build_situated_qa_dataset,
     build_sqa_train_dataset,
     build_triviaqa_control_dataset,
@@ -50,7 +51,8 @@ logger = logging.getLogger(__name__)
 
 # All valid split names
 VALID_SPLITS: set[str] = (
-    {"base", "temporal", "local", "cf_conflict", "cf_control", "sqa_train"}
+    {"base", "temporal", "local", "cf_conflict", "cf_control", "sqa_train",
+     "qm_conflict", "qm_control"}
     | {f"geo_{c}" for c in KNOWN_GEO_ADAPTERS}
 )
 
@@ -151,6 +153,9 @@ class EvalConfig:
     sqa_deval_path: str | None = None          # data/sqa_deval.json
     cf_adapter_name: str = "patch_cf_main"  # Adapter the router should pick for D_conflict
     cf_split_name: str = "test"  # Which split of counterfact_eval.json to use ('train' or 'test')
+    # AIT QM D_eval (qm_conflict + qm_control splits)
+    qm_conflict_path: str | None = None   # data/qm_conflict_pairs.json
+    qm_adapter_name: str = "patch_qm_current"  # Adapter the router should pick for qm_conflict
     # Log-probability scoring (ROME / MEMIT-style ESR). When enabled, the
     # runner asks the active pipeline for a teacher-forced log P(target |
     # prompt) on every sample, after generation. Reports include:
@@ -683,26 +688,29 @@ class EvalRunner:
         if self.config.use_gpu and not torch.cuda.is_available():
             logger.warning("GPU requested but CUDA not available — falling back to CPU")
 
-        # Build router
+        # Build router — skip embedding model when routing is bypassed (monolithic/no_adapter)
+        bypass_routing = bool(self.config.monolithic_adapter or self.config.no_adapter)
+        embedding_model_path = None if bypass_routing else self.config.embedding_model
         if self.config.router_state_path and Path(self.config.router_state_path).exists():
             router = CentroidRouter.load(
                 path=self.config.router_state_path,
-                embedding_model_path=self.config.embedding_model,
+                embedding_model_path=embedding_model_path,
                 similarity_threshold=self.config.similarity_threshold,
                 use_gpu=use_gpu,
             )
         else:
             router = CentroidRouter(
-                embedding_model_path=self.config.embedding_model,
+                embedding_model_path=embedding_model_path,
                 similarity_threshold=self.config.similarity_threshold,
                 use_gpu=use_gpu,
             )
-            checkpoints_dir = Path(self.config.checkpoints_dir)
-            if checkpoints_dir.exists():
-                n_registered = router.register_from_checkpoints(str(checkpoints_dir))
-                logger.info(f"Registered {n_registered} adapters from {checkpoints_dir}")
-            else:
-                logger.warning(f"Checkpoints dir not found: {checkpoints_dir}")
+            if not bypass_routing:
+                checkpoints_dir = Path(self.config.checkpoints_dir)
+                if checkpoints_dir.exists():
+                    n_registered = router.register_from_checkpoints(str(checkpoints_dir))
+                    logger.info(f"Registered {n_registered} adapters from {checkpoints_dir}")
+                else:
+                    logger.warning(f"Checkpoints dir not found: {checkpoints_dir}")
 
         self._attach_domain_classifier(router)
 
@@ -1235,6 +1243,26 @@ class EvalRunner:
                         samples = build_triviaqa_control_dataset(
                             triviaqa_path=self.config.triviaqa_dcontrol_path,
                             n_samples=self.config.n_samples,
+                        )
+                    elif split_name == "qm_conflict":
+                        if not self.config.qm_conflict_path:
+                            raise ValueError(
+                                "'qm_conflict' requires --qm_conflict_path"
+                            )
+                        samples = build_qm_conflict_dataset(
+                            qm_conflict_path=self.config.qm_conflict_path,
+                            n_samples=self.config.n_samples,
+                            qm_adapter_name=self.config.qm_adapter_name,
+                        )
+                    elif split_name == "qm_control":
+                        if not self.config.triviaqa_dcontrol_path:
+                            raise ValueError(
+                                "'qm_control' requires --triviaqa_dcontrol_path"
+                            )
+                        samples = build_triviaqa_control_dataset(
+                            triviaqa_path=self.config.triviaqa_dcontrol_path,
+                            n_samples=self.config.n_samples,
+                            split_name="qm_control",
                         )
                     elif split_name == "sqa_train":
                         if not self.config.sqa_deval_path:

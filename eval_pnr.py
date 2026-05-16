@@ -303,6 +303,23 @@ def parse_args() -> argparse.Namespace:
         help="Which CounterFact split to evaluate on (held-out 'test' by default)",
     )
 
+    # AIT QM D_eval
+    parser.add_argument(
+        "--qm_conflict_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to data/qm_conflict_pairs.json. Required when --eval_sets "
+            "includes 'qm_conflict'."
+        ),
+    )
+    parser.add_argument(
+        "--qm_adapter_name",
+        type=str,
+        default="patch_qm_current",
+        help="Adapter name tagged on qm_conflict samples (used by router).",
+    )
+
     # MORPHEUS architecture
     parser.add_argument(
         "--morpheus",
@@ -462,6 +479,12 @@ def main() -> None:
     if "sqa_train" in args.eval_sets and not args.sqa_deval_path:
         logger.error("--eval_sets includes 'sqa_train' but no --sqa_deval_path provided")
         sys.exit(1)
+    if "qm_conflict" in args.eval_sets and not args.qm_conflict_path:
+        logger.error("--eval_sets includes 'qm_conflict' but no --qm_conflict_path provided")
+        sys.exit(1)
+    if "qm_control" in args.eval_sets and not args.triviaqa_dcontrol_path:
+        logger.error("--eval_sets includes 'qm_control' but no --triviaqa_dcontrol_path provided")
+        sys.exit(1)
 
     config = EvalConfig(
         model_id=args.model_id,
@@ -495,6 +518,8 @@ def main() -> None:
         sqa_deval_path=args.sqa_deval_path,
         cf_adapter_name=args.cf_adapter_name,
         cf_split_name=args.cf_split_name,
+        qm_conflict_path=args.qm_conflict_path,
+        qm_adapter_name=args.qm_adapter_name,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         do_sample=False,

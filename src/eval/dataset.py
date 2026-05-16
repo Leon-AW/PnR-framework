@@ -372,6 +372,7 @@ def build_triviaqa_control_dataset(
     triviaqa_path: str,
     n_samples: int,
     random_seed: int = D_EVAL_SAMPLING_SEED,
+    split_name: str = "cf_control",
 ) -> list[EvalSample]:
     """Build D_control eval samples from ``data/triviaqa_dcontrol.json``.
 
@@ -443,7 +444,7 @@ def build_triviaqa_control_dataset(
             question=wrapped_q,
             gold_answers=gold,
             expected_adapter=None,
-            split="cf_control",
+            split=split_name,
             metadata={
                 "question_id": rec.get("question_id"),
                 "raw_question": question.strip(),
@@ -454,4 +455,76 @@ def build_triviaqa_control_dataset(
         ))
 
     logger.info(f"Built {len(samples)} D_control samples from {path}")
+    return samples
+
+
+def build_qm_conflict_dataset(
+    qm_conflict_path: str,
+    n_samples: int,
+    qm_adapter_name: str = "patch_qm_current",
+    random_seed: int = D_EVAL_SAMPLING_SEED,
+) -> list[EvalSample]:
+    """Build D_conflict eval samples from ``data/qm_conflict_pairs.json``.
+
+    The adapter is expected to output ``answer_new`` (the current correct fact).
+    ``answer_old`` is stored in metadata for downstream FR / backward-interference
+    analysis. Semi-synthetic pairs produced by ``scripts/build_qm_conflict_pairs.py``.
+
+    Args:
+        qm_conflict_path: Path to ``data/qm_conflict_pairs.json``.
+        n_samples: Maximum number of records to load.
+        qm_adapter_name: Adapter the router should route to.
+        random_seed: RNG seed for reproducible subsampling.
+
+    Returns:
+        List of EvalSample instances with ``split='qm_conflict'``.
+    """
+    path = Path(qm_conflict_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"QM conflict pairs file not found: {path}. "
+            "Run `scripts/build_qm_conflict_pairs.py` first."
+        )
+    with open(path, encoding="utf-8") as f:
+        records = json.load(f)
+
+    if n_samples < len(records):
+        rng = random.Random(random_seed)
+        selected_indices = sorted(rng.sample(range(len(records)), n_samples))
+        full_pool_size = len(records)
+        records = [records[i] for i in selected_indices]
+        logger.info(
+            f"D_conflict (QM): uniform-random sample of {n_samples} from "
+            f"{full_pool_size} records (seed={random_seed})"
+        )
+
+    samples: list[EvalSample] = []
+    for rec in records:
+        question = rec.get("question")
+        answer_new = rec.get("answer_new")
+        if not question or not answer_new:
+            continue
+        samples.append(EvalSample(
+            question=question.strip(),
+            gold_answers=[answer_new.strip()],
+            expected_adapter=qm_adapter_name,
+            split="qm_conflict",
+            metadata={
+                "id": rec.get("id"),
+                "answer_old": rec.get("answer_old"),
+                "changed_attribute": rec.get("changed_attribute"),
+                "old_value": rec.get("old_value"),
+                "new_value": rec.get("new_value"),
+                "language": rec.get("language"),
+                "intention_category": rec.get("intention_category"),
+                "complexity_level": rec.get("complexity_level"),
+                "source_file": rec.get("source_file"),
+                "source": "qm_conflict",
+            },
+        ))
+
+    logger.info(
+        f"Built {len(samples)} D_conflict (QM) samples from {path} "
+        f"(qm_adapter={qm_adapter_name!r})"
+    )
     return samples

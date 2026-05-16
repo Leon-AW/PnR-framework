@@ -99,6 +99,7 @@ class ExternalJudge:
         quantization: str = "int4",
         device: str = "cuda",
         max_new_tokens: int = JUDGE_MAX_NEW_TOKENS,
+        device_map: str | dict = "auto",
     ) -> None:
         if quantization not in {"int4", "int8", "none"}:
             raise ValueError("quantization must be one of: int4, int8, none")
@@ -106,6 +107,10 @@ class ExternalJudge:
         self.quantization = quantization
         self.device = device
         self.max_new_tokens = max_new_tokens
+        # "auto" splits across visible GPUs; pass {"": 0} to pin the whole
+        # model to one device (required on a single MIG slice, where "auto"
+        # mis-accounts the 4-bit footprint and spuriously offloads to CPU).
+        self.device_map = device_map
         self._model = None
         self._tokenizer = None
 
@@ -166,7 +171,7 @@ class ExternalJudge:
             "torch_dtype": torch.bfloat16,
         }
         if self.device == "cuda":
-            model_kwargs["device_map"] = "auto"
+            model_kwargs["device_map"] = self.device_map
         if quantization_config is not None:
             model_kwargs["quantization_config"] = quantization_config
 
@@ -232,6 +237,45 @@ class ExternalJudge:
             prompt_version=JUDGE_PROMPT_VERSION,
             judge_model_id=self.model_id,
         )
+
+    def generate(self, prompt: str, max_new_tokens: int = 256) -> str:
+        """Greedy-decode a free-form completion for an arbitrary prompt.
+
+        Additive helper that exposes the already-loaded Gemma model as a
+        general text generator (e.g. for constructing benchmark data), not
+        only as a binary judge. Deterministic (do_sample=False). Leaves
+        `load()` and `score()` untouched.
+        """
+        if self._model is None or self._tokenizer is None:
+            self.load()
+
+        import torch
+
+        chat = [{"role": "user", "content": prompt}]
+        encoded = self._tokenizer.apply_chat_template(
+            chat,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )
+        # transformers >=5.x returns a BatchEncoding; <=4.x a bare tensor.
+        input_ids = encoded.input_ids if hasattr(encoded, "input_ids") else encoded
+        target_device = self._model.device if self.device == "cuda" else "cpu"
+        input_ids = input_ids.to(target_device)
+
+        with torch.no_grad():
+            output = self._model.generate(
+                input_ids=input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=self._tokenizer.eos_token_id,
+            )
+
+        response_ids = output[0][input_ids.shape[1] :]
+        return self._tokenizer.decode(
+            response_ids,
+            skip_special_tokens=True,
+        ).strip()
 
     @staticmethod
     def _build_prompt(
