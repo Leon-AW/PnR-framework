@@ -3,6 +3,7 @@ docs/
 tasks/
 .claude/
 .cursor/
+external/
 
 # MLflow tracking store
 mlruns/
