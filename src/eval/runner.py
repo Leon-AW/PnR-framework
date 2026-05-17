@@ -39,6 +39,7 @@ from .metrics import (
     compute_esr,
     compute_logprob_em,
     compute_logprob_esr,
+    compute_strict_esr,
     compute_routing_accuracy,
     compute_stability_score,
     compute_cfr,
@@ -1240,6 +1241,14 @@ class EvalRunner:
             if lp_em is not None:
                 summary["logprob_em"] = lp_em
 
+        # Strict (decisive-override) ESR for AIT QM: the primary generation
+        # ESR also counts answers that still emit the obsolete old_value; the
+        # strict variant requires old_value absent. ESR - qm_strict_esr is the
+        # hedging rate. None for any run without qm_conflict data.
+        strict_esr = compute_strict_esr(all_results, split_filter="qm_conflict")
+        if strict_esr is not None:
+            summary["qm_strict_esr"] = strict_esr
+
         # D_control forgetting rate (no baseline needed — pre-filtered to 100%
         # base acc). Counts every `*_control` split, so it covers both
         # cf_control and qm_control transparently.
@@ -1280,11 +1289,19 @@ class EvalRunner:
                 lp_em_split = compute_logprob_em(split_results)
                 if lp_em_split is not None:
                     splits[split_name]["logprob_match_rate"] = round(lp_em_split, 4)
+            if split_name == "qm_conflict":
+                # Lenient ESR is `exact_match` above; `strict_esr` additionally
+                # requires the obsolete old_value to be absent from the answer.
+                strict_esr_split = compute_strict_esr(
+                    split_results, split_filter=split_name
+                )
+                if strict_esr_split is not None:
+                    splits[split_name]["strict_esr"] = round(strict_esr_split, 4)
 
         # Round optional floats in summary
         for key in ("routing_accuracy", "esr", "stability_score", "cfr", "cfr_control",
                     "dcontrol_forgetting_rate", "dcontrol_accuracy",
-                    "logprob_esr", "qm_logprob_esr", "logprob_em"):
+                    "logprob_esr", "qm_logprob_esr", "qm_strict_esr", "logprob_em"):
             if key in summary and summary[key] is not None:
                 summary[key] = round(summary[key], 4)
 

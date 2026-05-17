@@ -12,6 +12,7 @@ Metrics implemented:
 - exact_match / token_f1: answer quality (SQuAD-style)
 - compute_esr: Effective Success Rate (routing correct AND exact match)
 - compute_logprob_esr: ROME/MEMIT-style ESR (prob(target_new) > prob(target_true))
+- compute_strict_esr: decisive-override ESR for AIT QM (new_value present AND old_value absent)
 - compute_routing_accuracy: fraction routed to expected adapter
 - compute_stability_score: exact-match on "base" split (forgetting detection)
 - compute_cfr: Catastrophic Forgetting Rate (PnR vs baseline)
@@ -268,6 +269,51 @@ def compute_logprob_esr(
         1
         for r in applicable
         if r.logprob_target_new > r.logprob_target_true
+    ) / len(applicable)
+
+
+def compute_strict_esr(
+    results: list[EvalResult],
+    split_filter: str = "qm_conflict",
+) -> float | None:
+    """Strict (decisive-override) ESR for the AIT QM conflict split.
+
+    The primary generation ESR counts a conflict edit as successful as soon as
+    the short ``new_value`` surfaces in the answer — mirroring CounterFact's
+    atomic-edit criterion (this is the per-split ``exact_match`` for
+    ``qm_conflict``). A model can satisfy that while *also* still emitting the
+    obsolete ``old_value`` ("previously W04, now W06"). The strict variant
+    additionally requires the old value to be absent:
+
+        strict_ESR = 1[ new_value present  AND  old_value absent ]
+
+    so the gap ``ESR - strict_ESR`` directly measures how often the system
+    hedges instead of decisively overriding — an R1 decisiveness signal.
+
+    ``old_value_present`` is recorded on each sample's ``metadata`` by
+    ``EvalRunner._run_single`` for ``qm_conflict`` only; samples lacking it are
+    skipped, so this returns ``None`` for any run without QM conflict data.
+
+    Args:
+        results: All evaluation results.
+        split_filter: Conflict split to restrict to (default ``qm_conflict``).
+
+    Returns:
+        Strict ESR in [0, 1], or None when no QM conflict samples are present.
+    """
+    applicable = [
+        r
+        for r in results
+        if r.sample.split == split_filter
+        and (r.sample.metadata or {}).get("old_value_present") is not None
+    ]
+    if not applicable:
+        return None
+    return sum(
+        1
+        for r in applicable
+        if r.is_exact_match
+        and not (r.sample.metadata or {}).get("old_value_present")
     ) / len(applicable)
 
 

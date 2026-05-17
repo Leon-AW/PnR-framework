@@ -97,7 +97,9 @@ GEO_ADAPTERS = {
 # Adapters to skip (not part of the routing pool).
 # The current CF routing pool is the six `patch_cf_relfam_{0..5}` adapters
 # (one per Wikidata relation-family cluster). The legacy single-expert
-# `patch_cf_main` adapter and the descoped KMeans cluster adapters are kept
+# `patch_cf_main` adapter and the descoped KMeans cluster adapters are kept.
+# `monolithic_qm` is the catastrophic-forgetting baseline — it must not be
+# registered as a routing target; eval uses it via --monolithic flag only.
 # on disk for ablations but must NOT be registered in the routing manifest —
 # they would either duplicate the CF anchor block (main + relfam read the
 # same training distribution) or split CF routing across stale checkpoints
@@ -108,6 +110,7 @@ GEO_ADAPTERS = {
 # the training_config name, so the legacy ids are what we must skip.
 SKIP_ADAPTERS = {
     "monolithic_v1",
+    "monolithic_qm",
     "xlora_baseline",
     "patch_cf_main",
     "patch_cf_0",
@@ -177,6 +180,43 @@ def collect_cf_samples(jsonl_path: Path, max_samples: int) -> list[dict]:
                 "answer": record.get("answer", ""),
                 "subject": record.get("subject"),
                 "relation_id": record.get("relation_id"),
+            })
+            if len(samples) >= max_samples:
+                break
+    return samples
+
+
+def collect_qm_samples(jsonl_path: Path, max_samples: int) -> list[dict]:
+    """Collect (question, answer) records from a QM training JSONL file.
+
+    QM training data uses the chat-message format produced by
+    ``scripts/build_qm_train_data.py``: each record has a ``messages`` list
+    with a user turn (the question) and an assistant turn (the answer).
+    Extracts the user content as ``edited_question`` so the Source-Replay
+    indexer sees the same schema as SituatedQA and CounterFact collectors.
+    """
+    samples: list[dict] = []
+    with jsonl_path.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            messages = record.get("messages", [])
+            if len(messages) < 2:
+                continue
+            q = messages[0].get("content", "")
+            a = messages[1].get("content", "")
+            if not q or not q.strip():
+                continue
+            samples.append({
+                "edited_question": q.strip(),
+                "answer": a,
+                "id": record.get("id"),
+                "language": record.get("language"),
             })
             if len(samples) >= max_samples:
                 break
@@ -367,6 +407,10 @@ def parse_args() -> argparse.Namespace:
                              "but disables Change 3 / always-on replay).")
     parser.add_argument("--no_gpu", action="store_true",
                         help="Disable GPU for embedding model")
+    parser.add_argument("--qm_old_data_path", default="data/qm_train_old.jsonl",
+                        help="Path to QM old-facts training JSONL (used for base_qm anchors)")
+    parser.add_argument("--qm_new_data_path", default="data/qm_train.jsonl",
+                        help="Path to QM new-facts training JSONL (used for patch_qm_current anchors)")
     return parser.parse_args()
 
 
@@ -381,6 +425,8 @@ def main() -> None:
 
     cf_data_path = Path(args.cf_data_path)
     calib_neg_path = Path(args.calibration_neg_path) if args.calibration_neg_path else None
+    qm_old_data_path = Path(args.qm_old_data_path)
+    qm_new_data_path = Path(args.qm_new_data_path)
 
     logger.info("=" * 70)
     logger.info("BUILD ROUTER STATE")
@@ -390,6 +436,8 @@ def main() -> None:
     logger.info(f"Model:                 {args.embedding_model}")
     logger.info(f"Max samples / adapter: {args.max_samples}")
     logger.info(f"CF data path:          {cf_data_path} (exists={cf_data_path.exists()})")
+    logger.info(f"QM old data path:      {qm_old_data_path} (exists={qm_old_data_path.exists()})")
+    logger.info(f"QM new data path:      {qm_new_data_path} (exists={qm_new_data_path.exists()})")
     logger.info(
         f"Calib neg path:        {calib_neg_path} "
         f"(exists={calib_neg_path.exists() if calib_neg_path else False})"
@@ -491,6 +539,26 @@ def main() -> None:
                     continue
                 samples = collect_cf_samples(cf_data_path, args.max_samples)
                 logger.info(f"  Source: {cf_data_path} ({len(samples)} CF samples)")
+
+            elif adapter_id == "base_qm":
+                if not qm_old_data_path.exists():
+                    logger.error(
+                        f"  QM old-facts data not found: {qm_old_data_path} — "
+                        f"pass --qm_old_data_path. Skipping {adapter_id}."
+                    )
+                    continue
+                samples = collect_qm_samples(qm_old_data_path, args.max_samples)
+                logger.info(f"  Source: {qm_old_data_path} ({len(samples)} QM old-facts samples)")
+
+            elif adapter_id == "patch_qm_current":
+                if not qm_new_data_path.exists():
+                    logger.error(
+                        f"  QM new-facts data not found: {qm_new_data_path} — "
+                        f"pass --qm_new_data_path. Skipping {adapter_id}."
+                    )
+                    continue
+                samples = collect_qm_samples(qm_new_data_path, args.max_samples)
+                logger.info(f"  Source: {qm_new_data_path} ({len(samples)} QM new-facts samples)")
 
             else:
                 logger.warning(f"  Unknown adapter type for {adapter_id}, skipping")

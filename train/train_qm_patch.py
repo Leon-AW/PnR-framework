@@ -53,6 +53,14 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--data_path",  default="data/qm_train.jsonl")
     parser.add_argument("--adapter_name", default="patch_qm_current")
+    parser.add_argument("--adapter_type", default="patch_qm",
+                        help="Recorded in training_config.json: 'patch_qm' for "
+                             "the current-facts patch, 'base_qm' for the "
+                             "outdated-facts base adapter.")
+    parser.add_argument("--answer_field", default="answer_new",
+                        choices=["answer_new", "answer_old"],
+                        help="Which conflict-pair side --data_path was built "
+                             "from; recorded in training_config.json.")
     parser.add_argument("--output_dir", default=None,
                         help="Checkpoint dir (default: checkpoints/<adapter_name>)")
     parser.add_argument("--model_id",   default="mistralai/Mistral-7B-Instruct-v0.3")
@@ -151,7 +159,7 @@ def main() -> None:
 
     config_dict = {
         "adapter_name":       adapter_name,
-        "adapter_type":       "patch_qm",
+        "adapter_type":       args.adapter_type,
         "model_id":           args.model_id,
         "quantization":       args.quantization,
         "lora_r":             args.lora_r,
@@ -165,7 +173,7 @@ def main() -> None:
         "n_train_records":    n_records,
         "dataset":            "qm_conflict_pairs (semi-synthetic, AIT QM)",
         "prompt_field":       "question",
-        "answer_field":       "answer_new",
+        "answer_field":       args.answer_field,
         "metrics":            metrics,
     }
 

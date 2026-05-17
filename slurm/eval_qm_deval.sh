@@ -1,22 +1,29 @@
 #!/bin/bash
 #SBATCH --job-name=eval_qm_deval
-#SBATCH --partition=shared
-#SBATCH --account=aitf
+#SBATCH --partition=longgpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
+#SBATCH --gres=gpu:a10080gb:1
+#SBATCH --nodelist=gruenau10
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
-#SBATCH --gres=gpu:1g.24gb:1
-#SBATCH --time=04:00:00
-#SBATCH --output=logs/eval_qm_deval_%j.out
-#SBATCH --error=logs/eval_qm_deval_%j.err
+#SBATCH --mem=64G
+#SBATCH --time=08:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+#SBATCH --mail-type=END,FAIL
 
 # ==============================================================================
 # AIT QM D_eval — ESR (qm_conflict) + Forgetting Rate (qm_control)
 #
+# Runs on gruenau10 (3x A100-80GB), like the CounterFact / SituatedQA D_evals.
+# The AIT QM dataset is semi-synthetic and carries no sensitive data once built,
+# so QM evaluation runs on the gruenau cluster — not the AIT server. (Only
+# scripts/build_qm_conflict_pairs.py, which reads the proprietary data/DE source
+# corpus, is AIT-bound; the generated conflict pairs are not.)
+#
 # Evaluates patch_qm_current (monolithic, bypasses routing) on:
-#   qm_conflict  — semi-synthetic QM conflict pairs (measures R1 / ESR)
-#   qm_control   — TriviaQA D_control records       (measures R2 / forgetting)
+#   qm_conflict  — 500 semi-synthetic QM conflict pairs  (measures R1 / ESR)
+#   qm_control   — 1000 TriviaQA D_control records       (measures R2 / forgetting)
 #
 # QM answers are long free-form documents, so the runner auto-applies a
 # long-form generation config to `qm_conflict` only (512 tokens, no
@@ -24,32 +31,42 @@
 # is TriviaQA D_control and keeps the short `--max_new_tokens` config below so
 # the forgetting-rate probe stays byte-identical to cf_control conditions.
 # `--compute_logprob` adds the parsing-free, length-normalised TF-ESR
-# (logP(answer_new) > logP(answer_old)) alongside the generation ESR.
+# (logP(answer_new) > logP(answer_old)) alongside the generation ESR; the
+# report also carries qm_strict_esr (new_value present AND old_value absent).
 #
-# Run inside existing allocation (recommended — reuse job 10427):
-#   srun --jobid=10427 --overlap --job-name=eval_qm --time=03:00:00 bash -c '
-#     export CUDA_VISIBLE_DEVICES=MIG-24d12bbf-b110-51d8-92d4-6c94334de42b
-#     bash slurm/eval_qm_deval.sh' > logs/eval_qm_deval_srun.log 2>&1 &
+# --n_samples 1000 is a per-split cap: qm_conflict has exactly 500 records so
+# all 500 are used; qm_control draws the full 1000 TriviaQA D_control set,
+# matching the CF/SQA forgetting-rate tables.
 #
-# Or submit as a new SLURM job:
+# Usage:
 #   sbatch slurm/eval_qm_deval.sh
+#
+# To re-use for a PnR-routing run instead of monolithic, override via "$@":
+#   sbatch slurm/eval_qm_deval.sh --router_state checkpoints/router_state \
+#       --run_name pnr_qm_routed --output_dir eval_results/qm_routed
 # ==============================================================================
 
 set -euo pipefail
 
-REPO_ROOT="/gpfs/adafs/home/leon.wagner/PnR-framework"
-PYTHON="/gpfs/adafs/home/leon.wagner/miniconda3/envs/pnr/bin/python"
+cd "${SLURM_SUBMIT_DIR}"
 
-export HF_HUB_OFFLINE=1
+CONDA_BASE=/usr/local/anaconda3-2024.06
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate pnr
 
-cd "$REPO_ROOT"
+export TQDM_MININTERVAL=10
+export TQDM_NCOLS=100
 
-echo "Node: $(hostname)  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+echo "======================================================================"
+echo "Job ID  : ${SLURM_JOB_ID}"
+echo "Node    : ${SLURMD_NODENAME}"
+echo "Started : $(date)"
+echo "Args    : $*"
+echo "======================================================================"
 
-"$PYTHON" eval_pnr.py \
+python eval_pnr.py \
     --eval_sets qm_conflict qm_control \
-    --n_samples 500 \
+    --n_samples 1000 \
     --qm_conflict_path data/qm_conflict_pairs.json \
     --triviaqa_dcontrol_path data/triviaqa_dcontrol.json \
     --qm_adapter_name patch_qm_current \
@@ -61,3 +78,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
     --run_name pnr_qm_deval_v2 \
     --output_dir eval_results/qm_deval_v2 \
     "$@"
+
+echo "======================================================================"
+echo "Finished : $(date)"
+echo "======================================================================"

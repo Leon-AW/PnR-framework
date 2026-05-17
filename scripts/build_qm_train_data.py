@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """
-Build data/qm_train.jsonl — training data for the patch_qm_current LoRA adapter.
+Build QM adapter training data from data/qm_conflict_pairs.json.
 
-Converts data/qm_conflict_pairs.json into a JSONL file where each record has a
+Converts the conflict pairs into a JSONL file where each record has a
 ``messages`` field in Mistral chat format:
   user      → the QM question
-  assistant → answer_new  (the CURRENT, correct fact the patch must learn)
+  assistant → the chosen side of the pair (--answer_field)
+
+Each conflict pair holds both sides of one fact, so this builder produces the
+training set for *either* QM adapter:
+  --answer_field answer_new  → data/qm_train.jsonl      → patch_qm_current
+  --answer_field answer_old  → data/qm_train_old.jsonl  → base_qm
+
+Mistral has seen neither QM fact in pretraining, so the outdated side must be
+installed in its own adapter (base_qm) for the router to have a genuine
+old-vs-new conflict to resolve. See docs/roadmap.md NF-3.
 
 The format is byte-identical to what pnr.py / eval_pnr.py sends at inference
 time (apply_chat_template, add_generation_prompt=True at eval / False at train).
 SFTTrainer in trainer.py applies the chat template via _default_formatting_func.
 
 Usage:
-    python scripts/build_qm_train_data.py
-    python scripts/build_qm_train_data.py --input data/qm_conflict_pairs.json \\
-        --output data/qm_train.jsonl --seed 42
+    python scripts/build_qm_train_data.py                       # patch_qm_current
+    python scripts/build_qm_train_data.py --answer_field answer_old \\
+        --output data/qm_train_old.jsonl                        # base_qm
 """
 from __future__ import annotations
 
@@ -40,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input",  default="data/qm_conflict_pairs.json")
     parser.add_argument("--output", default="data/qm_train.jsonl")
+    parser.add_argument(
+        "--answer_field", choices=["answer_new", "answer_old"], default="answer_new",
+        help="Which side of each conflict pair becomes the assistant turn: "
+             "answer_new -> patch_qm_current (current facts); "
+             "answer_old -> base_qm (outdated facts).",
+    )
     parser.add_argument("--seed",   type=int, default=42)
     return parser.parse_args()
 
@@ -68,15 +83,15 @@ def main() -> int:
     written = 0
     with out_path.open("w", encoding="utf-8") as f:
         for pair in pairs:
-            question   = (pair.get("question")   or "").strip()
-            answer_new = (pair.get("answer_new") or "").strip()
-            if not question or not answer_new:
+            question = (pair.get("question")        or "").strip()
+            answer   = (pair.get(args.answer_field) or "").strip()
+            if not question or not answer:
                 continue
             record = {
                 "id": pair.get("id"),
                 "messages": [
                     {"role": "user",      "content": question},
-                    {"role": "assistant", "content": answer_new},
+                    {"role": "assistant", "content": answer},
                 ],
                 "language":           pair.get("language"),
                 "intention_category": pair.get("intention_category"),
