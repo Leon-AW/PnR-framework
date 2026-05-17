@@ -15,8 +15,16 @@
 # AIT QM D_eval — ESR (qm_conflict) + Forgetting Rate (qm_control)
 #
 # Evaluates patch_qm_current (monolithic, bypasses routing) on:
-#   qm_conflict  — 500 semi-synthetic QM conflict pairs (measures R1 / ESR)
-#   qm_control   — 1000 TriviaQA records (measures R2 / forgetting rate)
+#   qm_conflict  — semi-synthetic QM conflict pairs (measures R1 / ESR)
+#   qm_control   — TriviaQA D_control records       (measures R2 / forgetting)
+#
+# QM answers are long free-form documents, so the runner auto-applies a
+# long-form generation config to `qm_conflict` only (512 tokens, no
+# sentence-boundary stop sequences, no short-answer truncation). `qm_control`
+# is TriviaQA D_control and keeps the short `--max_new_tokens` config below so
+# the forgetting-rate probe stays byte-identical to cf_control conditions.
+# `--compute_logprob` adds the parsing-free, length-normalised TF-ESR
+# (logP(answer_new) > logP(answer_old)) alongside the generation ESR.
 #
 # Run inside existing allocation (recommended — reuse job 10427):
 #   srun --jobid=10427 --overlap --job-name=eval_qm --time=03:00:00 bash -c '
@@ -47,8 +55,9 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
     --qm_adapter_name patch_qm_current \
     --monolithic checkpoints/patch_qm_current \
     --quantization int4 \
-    --max_new_tokens 32 \
+    --max_new_tokens 256 \
+    --compute_logprob \
     --experiment_name pnr-qm-deval \
-    --run_name pnr_qm_deval_v1 \
-    --output_dir eval_results/qm_deval_v1 \
+    --run_name pnr_qm_deval_v2 \
+    --output_dir eval_results/qm_deval_v2 \
     "$@"

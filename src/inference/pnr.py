@@ -690,6 +690,7 @@ class PatchAndRouteInference:
         targets: list[str],
         skip_routing: bool = False,
         force_adapter: str | None = None,
+        length_normalised: bool = False,
     ) -> dict[str, float]:
         """Compute log P(target | prompt) for each target on the routed model.
 
@@ -705,10 +706,15 @@ class PatchAndRouteInference:
                 for CounterFact, or ``gold_aliases`` for TriviaQA).
             skip_routing: Same semantics as ``generate``.
             force_adapter: Same semantics as ``generate``.
+            length_normalised: If True, return mean log-prob per target
+                token instead of the sum. Use for comparing long targets of
+                slightly different lengths (e.g. AIT QM ``answer_new`` vs
+                ``answer_old``); default ``False`` matches the ROME / MEMIT
+                convention used for CounterFact short targets.
 
         Returns:
-            ``{target: logprob}`` mapping (sum-of-log-probs, *not*
-            length-normalised — matches ROME / MEMIT convention).
+            ``{target: logprob}`` mapping — sum-of-log-probs by default, or
+            mean-per-token when ``length_normalised=True``.
         """
         self._ensure_llm_loaded()
 
@@ -746,6 +752,7 @@ class PatchAndRouteInference:
                 prompt=full_prompt,
                 target=target,
                 use_gpu=self.use_gpu,
+                length_normalised=length_normalised,
             )
         return scores
     

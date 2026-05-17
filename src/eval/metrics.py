@@ -364,24 +364,35 @@ def compute_cfr(
     return (baseline_acc - pnr_acc) / baseline_acc
 
 
-def compute_dcontrol_forgetting_rate(results: list[EvalResult]) -> float | None:
+def compute_dcontrol_forgetting_rate(
+    results: list[EvalResult],
+    split_filter: str | None = None,
+) -> float | None:
     """Forgetting rate on the TriviaQA D_control set.
 
     D_control was pre-filtered so the frozen base model answered every question
     correctly (baseline accuracy = 1.0 by construction). Any drop is therefore
     pure routing/interference-induced forgetting:
 
-        FR = 1.0 - accuracy_on_cf_control
+        FR = 1.0 - accuracy_on_D_control
 
-    No separate baseline run is required.
+    No separate baseline run is required. The same TriviaQA D_control file
+    backs every dataset's control split (``cf_control``, ``qm_control``), so a
+    single run carries exactly one control split.
 
     Args:
-        results: Evaluation results containing cf_control samples.
+        results: Evaluation results containing a ``*_control`` split.
+        split_filter: Restrict to one named control split. When ``None``
+            (default), every split whose name ends in ``_control`` is counted
+            — covers ``cf_control`` and ``qm_control`` transparently.
 
     Returns:
-        Forgetting rate in [0, 1], or None if no cf_control samples.
+        Forgetting rate in [0, 1], or None if no control samples are present.
     """
-    ctrl = [r for r in results if r.sample.split == "cf_control"]
+    if split_filter is not None:
+        ctrl = [r for r in results if r.sample.split == split_filter]
+    else:
+        ctrl = [r for r in results if r.sample.split.endswith("_control")]
     if not ctrl:
         return None
     accuracy = sum(1 for r in ctrl if r.is_exact_match) / len(ctrl)

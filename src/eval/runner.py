@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,11 +44,26 @@ from .metrics import (
     compute_cfr,
     compute_dcontrol_forgetting_rate,
     exact_match,
+    normalize_answer,
     parse_model_output,
     token_f1,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _normalised_value_present(value: str, normalised_text: str) -> bool:
+    """True if ``value`` occurs in ``normalised_text`` as a standalone token run.
+
+    Both arguments must already be ``normalize_answer``-ed. Uses non-word
+    lookarounds rather than plain ``in`` containment so a short edit value
+    ("3", "GG2", "M50") cannot spuriously match inside a longer token (the
+    "3" in a normalised "634"). Used for the AIT QM atomic-edit ESR check.
+    """
+    if not value:
+        return False
+    return re.search(rf"(?<!\w){re.escape(value)}(?!\w)", normalised_text) is not None
+
 
 # All valid split names
 VALID_SPLITS: set[str] = (
@@ -101,6 +117,15 @@ class EvalConfig:
     monolithic_adapter: str | None = None
     no_adapter: bool = False  # Frozen base model only — no routing, no adapter (CFR baseline)
     max_new_tokens: int = 256
+    # Splits whose gold answers are long free-form documents (AIT QM document
+    # QA). For these, `_run_single` generates with `long_form_max_new_tokens`,
+    # disables sentence-boundary stop sequences, and keeps the full untruncated
+    # text. Short-answer splits (cf_*, sqa_train, qm_control = TriviaQA
+    # D_control) are unaffected and keep the `max_new_tokens` short config.
+    # A list (not a set) so `dataclasses.asdict` → `json.dump` serialises it
+    # cleanly into report.json's config block.
+    long_form_splits: list[str] = field(default_factory=lambda: ["qm_conflict"])
+    long_form_max_new_tokens: int = 512
     temperature: float = 0.1
     do_sample: bool = False
     mlflow_experiment: str = "pnr-evaluation"
@@ -755,6 +780,31 @@ class EvalRunner:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
+        # Long-form splits (AIT QM document QA) need a longer token budget and
+        # no sentence-boundary stop sequences — the short-answer defaults would
+        # truncate a multi-paragraph answer after its first clause. Only the
+        # PnR pipeline (`PatchAndRouteInference`) honours a per-call generation
+        # config; orchestrator / baseline backends ignore it (warn instead).
+        long_form_cfg = None
+        if sample.split in self.config.long_form_splits:
+            if (self.config.parallel_orchestrator
+                    or self.config.recipe_official_checkpoint
+                    or self.config.lora_rag_adapter
+                    or self.config.xlora_checkpoint):
+                logger.warning(
+                    "Long-form split %r on a backend that ignores per-call "
+                    "generation config — answer will use the short config.",
+                    sample.split,
+                )
+            else:
+                from src.inference import GenerationConfig
+                long_form_cfg = GenerationConfig(
+                    max_new_tokens=self.config.long_form_max_new_tokens,
+                    temperature=self.config.temperature,
+                    do_sample=self.config.do_sample,
+                    stop_sequences=(),
+                )
+
         # Time the inference
         t_start = time.perf_counter()
 
@@ -770,14 +820,22 @@ class EvalRunner:
             # Frozen base model only — skip routing and load no adapter.
             # This is Pass 1 of the CFR protocol: measures what the foundation
             # already knows, providing the true pre-patch baseline.
-            result = pipeline.generate(query=sample.question, skip_routing=True)
+            result = pipeline.generate(
+                query=sample.question,
+                skip_routing=True,
+                generation_config=long_form_cfg,
+            )
         elif self.config.monolithic_adapter:
             result = pipeline.generate(
                 query=sample.question,
                 force_adapter=self.config.monolithic_adapter,
+                generation_config=long_form_cfg,
             )
         else:
-            result = pipeline.generate(query=sample.question)
+            result = pipeline.generate(
+                query=sample.question,
+                generation_config=long_form_cfg,
+            )
 
         t_end = time.perf_counter()
         latency_ms = (t_end - t_start) * 1000.0
@@ -786,12 +844,33 @@ class EvalRunner:
         if torch.cuda.is_available():
             vram_mb = torch.cuda.max_memory_allocated() / 1e6
 
-        # Parse answer
-        parsed = parse_model_output(result.response)
+        # Parse answer — long-form splits keep the full untruncated text;
+        # truncating at the first sentence boundary would discard everything
+        # after a multi-paragraph answer's opening clause.
+        is_long_form = sample.split in self.config.long_form_splits
+        parsed = parse_model_output(
+            result.response,
+            truncate_to_short_answer=not is_long_form,
+        )
 
         # Compute metrics
-        is_em = exact_match(parsed, sample.gold_answers)
         f1 = token_f1(parsed, sample.gold_answers)
+        if sample.split == "qm_conflict":
+            # QM ESR mirrors CounterFact's atomic-edit success criterion: the
+            # edit landed iff the short `new_value` surfaces in the generated
+            # answer. `gold_answers` stays the full `answer_new`, so `f1` above
+            # still measures full-answer overlap. `old_value` presence is a
+            # backward-interference diagnostic, not part of ESR.
+            norm_pred = normalize_answer(parsed)
+            new_value = normalize_answer((sample.metadata or {}).get("new_value") or "")
+            old_value = normalize_answer((sample.metadata or {}).get("old_value") or "")
+            is_em = _normalised_value_present(new_value, norm_pred)
+            if sample.metadata is not None:
+                sample.metadata["old_value_present"] = _normalised_value_present(
+                    old_value, norm_pred
+                )
+        else:
+            is_em = exact_match(parsed, sample.gold_answers)
 
         # Routing correctness
         adapter_used = result.adapter_loaded
@@ -975,6 +1054,46 @@ class EvalRunner:
                 out["is_logprob_match"] = bool(lp_new > lp_true)
             return out
 
+        if sample.split == "qm_conflict":
+            # Mirrors cf_conflict, but the targets are full long-form QM
+            # answers: ``answer_new`` (gold — the current fact the patch must
+            # assert) vs ``answer_old`` (the contradicting earlier revision).
+            # Length-normalised so this near-equal-length pair is compared
+            # per-token, not penalised for a few extra markdown-table tokens.
+            target_new = sample.gold_answers[0] if sample.gold_answers else ""
+            target_true = (sample.metadata or {}).get("answer_old") or ""
+            if not target_new or not target_true:
+                return out
+            try:
+                kwargs: dict[str, Any] = {"length_normalised": True}
+                if self.config.no_adapter:
+                    kwargs["skip_routing"] = True
+                elif self.config.monolithic_adapter:
+                    kwargs["force_adapter"] = self.config.monolithic_adapter
+                scores = score_fn(
+                    sample.question,
+                    [target_new, target_true],
+                    **kwargs,
+                )
+            except TypeError:
+                scores = score_fn(sample.question, [target_new, target_true])
+            except Exception as exc:
+                logger.warning(
+                    "score_targets failed for qm_conflict sample (id=%s): %s",
+                    (sample.metadata or {}).get("id"),
+                    exc,
+                )
+                return out
+
+            lp_new = scores.get(target_new)
+            lp_true = scores.get(target_true)
+            out["logprob_target_new"] = lp_new
+            out["logprob_target_true"] = lp_true
+            out["logprob_gold"] = lp_new
+            if lp_new is not None and lp_true is not None:
+                out["is_logprob_match"] = bool(lp_new > lp_true)
+            return out
+
         # Other splits — score every gold alias, take the max.
         targets = [g for g in sample.gold_answers if g]
         if not targets:
@@ -1107,14 +1226,23 @@ class EvalRunner:
         # Large divergences flag a parsing issue or a generation
         # distribution-mismatch in one of the systems.
         if any(r.is_logprob_match is not None for r in all_results):
-            lp_esr = compute_logprob_esr(all_results)
-            if lp_esr is not None:
-                summary["logprob_esr"] = lp_esr
+            # logprob ESR is per conflict split: cf_conflict → "logprob_esr",
+            # qm_conflict → "qm_logprob_esr" (a run carries at most one).
+            for conflict_split in ("cf_conflict", "qm_conflict"):
+                lp_esr = compute_logprob_esr(
+                    all_results, split_filter=conflict_split
+                )
+                if lp_esr is not None:
+                    key = ("logprob_esr" if conflict_split == "cf_conflict"
+                           else "qm_logprob_esr")
+                    summary[key] = lp_esr
             lp_em = compute_logprob_em(all_results)
             if lp_em is not None:
                 summary["logprob_em"] = lp_em
 
-        # D_control forgetting rate (no baseline needed — pre-filtered to 100% base acc)
+        # D_control forgetting rate (no baseline needed — pre-filtered to 100%
+        # base acc). Counts every `*_control` split, so it covers both
+        # cf_control and qm_control transparently.
         fr = compute_dcontrol_forgetting_rate(all_results)
         if fr is not None:
             summary["dcontrol_forgetting_rate"] = fr
@@ -1143,8 +1271,10 @@ class EvalRunner:
             if any(r.morpheus_zone is not None for r in split_results):
                 splits[split_name]["morpheus"] = _summarise_morpheus(split_results)
             if any(r.is_logprob_match is not None for r in split_results):
-                if split_name == "cf_conflict":
-                    lp_esr_split = compute_logprob_esr(split_results)
+                if split_name in ("cf_conflict", "qm_conflict"):
+                    lp_esr_split = compute_logprob_esr(
+                        split_results, split_filter=split_name
+                    )
                     if lp_esr_split is not None:
                         splits[split_name]["logprob_esr"] = round(lp_esr_split, 4)
                 lp_em_split = compute_logprob_em(split_results)
@@ -1154,7 +1284,7 @@ class EvalRunner:
         # Round optional floats in summary
         for key in ("routing_accuracy", "esr", "stability_score", "cfr", "cfr_control",
                     "dcontrol_forgetting_rate", "dcontrol_accuracy",
-                    "logprob_esr", "logprob_em"):
+                    "logprob_esr", "qm_logprob_esr", "logprob_em"):
             if key in summary and summary[key] is not None:
                 summary[key] = round(summary[key], 4)
 
