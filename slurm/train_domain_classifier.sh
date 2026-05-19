@@ -11,13 +11,19 @@
 #SBATCH --mail-type=END,FAIL
 
 # ==============================================================================
-# Phase 4 — train the 3-class domain classifier (Stage 1 of two-stage routing).
+# Train the 4-class domain classifier — Stage 1 of the two-stage router.
 #
-# Wraps the data-build + training steps in a single SLURM job. Mirrors
-# slurm/train_factuality_classifier.sh — same encoder, same MLP topology,
-# same partition. The job runs in parallel with the cluster training jobs
-# (Phase 2) since the classifier needs <8 GB and shares the A100 via MPS
-# without contending materially with LoRA adapter training.
+# Extends the Phase-4 3-class classifier (cf/sqa/ood_trivia) with a 4th
+# class "qm" for AIT QM queries, so Stage-1 routing covers the QM domain
+# and routes qm queries to {base_qm, patch_qm_current} in Stage 2.
+#
+# QM class uses 500 available questions (imbalanced vs ~5000 for the other
+# three classes); stratified split preserves the imbalance. Expect slightly
+# lower QM-specific recall than the other classes — primary concern is OOD
+# rejection (ood_trivia recall) which is unaffected.
+#
+# Output: /vol/tmp/wagnerql/checkpoints/domain_classifier  (overwrites v3)
+# Backup: checkpoints/domain_classifier.backup_3class is created first.
 # ==============================================================================
 
 set -euo pipefail
@@ -37,20 +43,28 @@ echo "Started    : $(date)"
 echo "Output dir : ${OUTPUT_DIR}"
 echo "======================================================================"
 
-echo "--- Step 1: building 3-class domain data (cf / sqa / ood_trivia) ---"
+# Back up the existing 3-class checkpoint before overwriting.
+if [ -L "checkpoints/domain_classifier" ]; then
+    cp -r "checkpoints/domain_classifier" "checkpoints/domain_classifier.backup_3class" 2>/dev/null || true
+    echo "Backed up 3-class checkpoint → checkpoints/domain_classifier.backup_3class"
+fi
+
+echo "--- Step 1: building 4-class domain data (cf / sqa / qm / ood_trivia) ---"
 python scripts/build_domain_classifier_data.py \
-    --output_path data/domain_classifier_data.json \
+    --output_path data/domain_classifier_data_4class.json \
     --cf_train_path data/counterfact_train.jsonl \
     --sqa_cache_dir data/sqa_train_cache \
+    --qm_train_path data/qm_train.jsonl \
+    --qm_n_samples 500 \
     --dcontrol_path data/triviaqa_dcontrol.json \
     --dcalibration_path data/triviaqa_dcalibration.json \
     --n_per_class 5000 \
     --val_frac 0.10 \
     --seed 42
 
-echo "--- Step 2: training 3-class classifier ---"
+echo "--- Step 2: training 4-class classifier ---"
 python scripts/train_domain_classifier.py \
-    --data_path data/domain_classifier_data.json \
+    --data_path data/domain_classifier_data_4class.json \
     --embedding_model sentence-transformers/all-MiniLM-L6-v2 \
     --output_dir "${OUTPUT_DIR}" \
     --epochs 30 \
@@ -60,8 +74,13 @@ python scripts/train_domain_classifier.py \
     --hidden_dims 256 64 \
     --patience 5
 
+ln -sfn "${OUTPUT_DIR}" checkpoints/domain_classifier
+echo "Symlinked checkpoints/domain_classifier → ${OUTPUT_DIR}"
+
 echo "======================================================================"
 echo "Finished   : $(date)"
 echo "Checkpoint : ${OUTPUT_DIR}"
-echo "Next       : wire src/routing/centroid_router.py to consume this checkpoint."
+echo "Next       : sbatch slurm/eval_qm_deval.sh --router_state checkpoints/router_state"
+echo "             --domain_classifier_path checkpoints/domain_classifier"
+echo "             --run_name pnr_qm_routed --output_dir eval_results/qm_deval_pnr"
 echo "======================================================================"

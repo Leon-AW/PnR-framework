@@ -824,6 +824,7 @@ class CentroidRouter(BaseRouter):
     _CF_ADAPTER_PREFIX = "patch_cf_relfam_"
     _SQA_GEO_PREFIX = "patch_geo_"
     _SQA_BASE_ADAPTERS = frozenset({"base_v1", "patch_temp_2019_plus"})
+    _QM_ADAPTERS = frozenset({"base_qm", "patch_qm_current"})
 
     def _allowed_adapters_for_domain(self, domain: str) -> set[str] | None:
         """Translate a Stage-1 domain class to the Stage-2 candidate set.
@@ -841,6 +842,8 @@ class CentroidRouter(BaseRouter):
                 a for a in all_ids
                 if a in self._SQA_BASE_ADAPTERS or a.startswith(self._SQA_GEO_PREFIX)
             }
+        if domain == "qm":
+            return {a for a in all_ids if a in self._QM_ADAPTERS}
         if domain == "ood_trivia":
             return set()
         return None

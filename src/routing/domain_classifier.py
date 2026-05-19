@@ -11,7 +11,7 @@ deliberately — same MiniLM-L6-v2 encoder, same MLP topology, same
 LayerNorm + GELU + Dropout — only the head differs:
 
   * factuality: ``Linear(64, 1) → Sigmoid`` + BCELoss
-  * domain:     ``Linear(64, 3)``         + CrossEntropyLoss (softmax in predict)
+  * domain:     ``Linear(64, 4)``         + CrossEntropyLoss (softmax in predict)
 
 The classes match ``CLASS_LABELS`` in ``scripts/build_domain_classifier_data.py``
 exactly, by integer index, so the training script can use ``label`` directly
@@ -29,11 +29,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-CLASS_LABELS: list[str] = ["cf", "sqa", "ood_trivia"]
+CLASS_LABELS: list[str] = ["cf", "sqa", "qm", "ood_trivia"]
 
 
 class DomainClassifier:
-    """3-class classifier: cf / sqa / ood_trivia.
+    """4-class classifier: cf / sqa / qm / ood_trivia.
 
     Inference contract (consumed by ``CentroidRouter``):
 

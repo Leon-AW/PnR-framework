@@ -21,7 +21,7 @@
 # scripts/build_qm_conflict_pairs.py, which reads the proprietary data/DE source
 # corpus, is AIT-bound; the generated conflict pairs are not.)
 #
-# Evaluates patch_qm_current (monolithic, bypasses routing) on:
+# Evaluates a system (mode set by the caller — see Usage) on:
 #   qm_conflict  — 500 semi-synthetic QM conflict pairs  (measures R1 / ESR)
 #   qm_control   — 1000 TriviaQA D_control records       (measures R2 / forgetting)
 #
@@ -38,12 +38,21 @@
 # all 500 are used; qm_control draws the full 1000 TriviaQA D_control set,
 # matching the CF/SQA forgetting-rate tables.
 #
-# Usage:
-#   sbatch slurm/eval_qm_deval.sh
+# This script hardcodes only the QM-common args; the system mode (monolithic /
+# routing / no_adapter / ...) and the run_name + output_dir are passed via "$@",
+# matching slurm/eval_deval.sh. A bare invocation runs PnR routing (no mode flag).
 #
-# To re-use for a PnR-routing run instead of monolithic, override via "$@":
+# Usage:
+#   # Monolithic baseline (patch_qm_current, bypasses routing):
+#   sbatch slurm/eval_qm_deval.sh --monolithic checkpoints/patch_qm_current \
+#       --run_name pnr_qm_deval_v2 --output_dir eval_results/qm_deval_v2
+#
+#   # PnR two-adapter routing (base_qm + patch_qm_current, Time-Aware):
 #   sbatch slurm/eval_qm_deval.sh --router_state checkpoints/router_state \
-#       --run_name pnr_qm_routed --output_dir eval_results/qm_routed
+#       --similarity_threshold 0.45 \
+#       --domain_classifier_path checkpoints/domain_classifier \
+#       --domain_confidence_threshold 0.7 --domain_fallback_threshold 0.30 \
+#       --run_name pnr_qm_routed --output_dir eval_results/qm_deval_pnr
 # ==============================================================================
 
 set -euo pipefail
@@ -70,13 +79,10 @@ python eval_pnr.py \
     --qm_conflict_path data/qm_conflict_pairs.json \
     --triviaqa_dcontrol_path data/triviaqa_dcontrol.json \
     --qm_adapter_name patch_qm_current \
-    --monolithic checkpoints/patch_qm_current \
     --quantization int4 \
     --max_new_tokens 256 \
     --compute_logprob \
     --experiment_name pnr-qm-deval \
-    --run_name pnr_qm_deval_v2 \
-    --output_dir eval_results/qm_deval_v2 \
     "$@"
 
 echo "======================================================================"

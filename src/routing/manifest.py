@@ -618,8 +618,17 @@ class AdapterManifest:
                 adapter_id = training_config.get("adapter_name", subdir.name)
                 adapter_type = training_config.get("adapter_type", "unknown")
                 
-                # Use file modification time as fallback timestamp
-                timestamp = base_timestamp or subdir.stat().st_mtime
+                # Timestamp drives Time-Aware conflict resolution (newer
+                # knowledge wins). Prefer the semantic `knowledge_timestamp`
+                # declared in training_config — a base adapter holds older
+                # knowledge than its patch regardless of which was trained
+                # first. Fall back to training wall-clock (dir mtime) only
+                # when no semantic date is declared.
+                timestamp = (
+                    training_config.get("knowledge_timestamp")
+                    or base_timestamp
+                    or subdir.stat().st_mtime
+                )
                 
                 manifest.register(
                     adapter_id=adapter_id,

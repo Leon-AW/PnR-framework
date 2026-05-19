@@ -34,7 +34,7 @@ METHODS: list[dict[str, str | None]] = [
         # standardised SQA D_eval (1 000 train + D_control, May 2)
         "situated_qa":  "frozen_base_sqa_deval",
         "counterfact":  "frozen_base_deval_v2",
-        # "ait_qm":    None,
+        "ait_qm":       "qm_deval_frozen/pnr_qm_frozen",
     },
     {
         "name":         "X-LoRA",
@@ -63,6 +63,15 @@ METHODS: list[dict[str, str | None]] = [
         "name":         "Monolithic LoRA",
         "situated_qa":  "monolithic_sqa_deval",
         "counterfact":  "monolithic_deval_v2",
+        # QM monolithic = patch_qm_current only (new facts, no base_qm)
+        "ait_qm":       "qm_deval_v2/pnr_qm_deval_v2",
+    },
+    {
+        "name":         "Monolithic LoRA (sequential QM)",
+        "situated_qa":  None,
+        "counterfact":  None,
+        # QM sequential monolithic = old→new, demonstrates catastrophic forgetting
+        "ait_qm":       "qm_deval_monolithic/pnr_qm_monolithic",
     },
     {
         "name":         "LoRA + RAG",
@@ -80,6 +89,7 @@ METHODS: list[dict[str, str | None]] = [
         "name":         "PnR Routing (multi-expert + 2-stage)",
         "situated_qa":  "pnr_phase5_sqa_deval",
         "counterfact":  "pnr_phase5_cf_deval",
+        "ait_qm":       "qm_deval_pnr/pnr_qm_routed",
     },
     {
         "name":         "MORPHEUS (τ, bypass)",
@@ -165,9 +175,31 @@ def _extract_counterfact(report: dict) -> dict[str, float | None]:
     }
 
 
-# Add future datasets here, e.g.:
-# def _extract_ait_qm(report: dict) -> dict[str, float | None]:
-#     ...
+def _extract_ait_qm(report: dict) -> dict[str, float | None]:
+    s  = report.get("summary", {})
+    sp = report.get("by_split", {})
+    # qm_conflict: primary ESR metrics; qm_control: forgetting rate
+    esr      = _get(sp, "qm_conflict", "exact_match", default=_get(s, "esr"))
+    f1       = _get(sp, "qm_conflict", "f1")
+    logp_esr = _get(sp, "qm_conflict", "logprob_esr",
+                    default=_get(s, "qm_logprob_esr"))
+    strict   = _get(sp, "qm_conflict", "strict_esr",
+                    default=_get(s, "qm_strict_esr"))
+    judge    = _get(sp, "qm_conflict", "judge_accuracy")
+    ctrl_acc = _get(sp, "qm_control",  "exact_match",
+                    default=_get(s, "dcontrol_accuracy"))
+    qm_fr    = _get(s, "dcontrol_forgetting_rate")
+    if qm_fr is None and ctrl_acc is not None:
+        qm_fr = 1.0 - ctrl_acc
+    return {
+        "qm_esr":      esr,
+        "qm_f1":       f1,
+        "qm_logp_esr": logp_esr,
+        "qm_strict":   strict,
+        "qm_judge":    judge,
+        "qm_fr":       qm_fr,
+    }
+
 
 DATASETS: list[dict] = [
     {
@@ -192,16 +224,18 @@ DATASETS: list[dict] = [
         ],
         "extract": _extract_counterfact,
     },
-    # Uncomment when AIT QM runs are available:
-    # {
-    #     "key":     "ait_qm",
-    #     "label":   "AIT QM",
-    #     "columns": [
-    #         ("EM",  "ait_em", ">", 6),
-    #         ("F1",  "ait_f1", ">", 6),
-    #     ],
-    #     "extract": _extract_ait_qm,
-    # },
+    {
+        "key":     "ait_qm",
+        "label":   "AIT QM",
+        "columns": [
+            ("ESR",        "qm_esr",      ">", 6),
+            ("F1",         "qm_f1",       ">", 6),
+            ("TF-ESR",     "qm_logp_esr", ">", 7),
+            ("Strict ESR", "qm_strict",   ">", 10),
+            ("Judge",      "qm_judge",    ">", 6),
+        ],
+        "extract": _extract_ait_qm,
+    },
 ]
 
 # System-level columns sourced from the counterfact run (FR is dataset-agnostic)

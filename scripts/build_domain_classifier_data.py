@@ -62,7 +62,8 @@ import urllib.request
 from pathlib import Path
 
 # Class label ordering — index = integer label used by CrossEntropyLoss.
-CLASS_LABELS: list[str] = ["cf", "sqa", "ood_trivia"]
+# Must stay in sync with src/routing/domain_classifier.py CLASS_LABELS.
+CLASS_LABELS: list[str] = ["cf", "sqa", "qm", "ood_trivia"]
 
 GITHUB_SQA_URLS: list[tuple[str, str]] = [
     (
@@ -76,6 +77,20 @@ GITHUB_SQA_URLS: list[tuple[str, str]] = [
         "data/qa_data/geo.train.jsonl",
     ),
 ]
+
+
+def _load_qm_questions(path: Path) -> list[str]:
+    """Return user questions from a QM training JSONL (chat-message format)."""
+    questions: list[str] = []
+    with path.open() as f:
+        for line in f:
+            rec = json.loads(line)
+            messages = rec.get("messages", [])
+            if messages:
+                q = (messages[0].get("content") or "").strip()
+                if q:
+                    questions.append(q)
+    return questions
 
 
 def _load_cf_questions(path: Path) -> list[str]:
@@ -200,6 +215,12 @@ def build(args: argparse.Namespace) -> None:
     rng.shuffle(sqa_pairs)
     sqa_sample = sqa_pairs[: args.n_per_class]
 
+    qm_questions = _load_qm_questions(Path(args.qm_train_path))
+    print(f"  QM train: {len(qm_questions):,} questions available")
+    rng.shuffle(qm_questions)
+    qm_sample = qm_questions[: args.qm_n_samples]
+    print(f"  QM using: {len(qm_sample):,} questions (--qm_n_samples cap)")
+
     excluded_ids = _load_excluded_triviaqa_ids(
         Path(args.dcontrol_path),
         Path(args.dcalibration_path),
@@ -214,6 +235,9 @@ def build(args: argparse.Namespace) -> None:
     for tag, q in sqa_sample:
         items.append({"text": q, "label": CLASS_LABELS.index("sqa"),
                       "class": "sqa", "source": f"sqa_{tag}"})
+    for q in qm_sample:
+        items.append({"text": q, "label": CLASS_LABELS.index("qm"),
+                      "class": "qm", "source": "qm_train"})
     for q in trivia_sample:
         items.append({"text": q, "label": CLASS_LABELS.index("ood_trivia"),
                       "class": "ood_trivia", "source": "triviaqa_train"})
@@ -239,9 +263,11 @@ def build(args: argparse.Namespace) -> None:
                 "n_excluded_triviaqa_ids": len(excluded_ids),
             },
             "note": (
-                "3-class Stage-1 router gate. Downstream test = SQA "
-                "routing_acc + TriviaQA D_control FR from PnR/Parallel "
-                "D_eval. See scripts/build_domain_classifier_data.py."
+                "4-class Stage-1 router gate (cf/sqa/qm/ood_trivia). "
+                "QM class uses all available questions (~500, imbalanced vs "
+                "cf/sqa/ood_trivia at 5000). Downstream test = SQA/QM "
+                "routing_acc + TriviaQA D_control FR. See "
+                "scripts/build_domain_classifier_data.py."
             ),
         },
         "train": train,
@@ -269,6 +295,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--dcontrol_path", default="data/triviaqa_dcontrol.json")
     p.add_argument("--dcalibration_path", default="data/triviaqa_dcalibration.json")
+    p.add_argument("--qm_train_path", default="data/qm_train.jsonl",
+                   help="QM training JSONL (chat-message format); used for the 'qm' class.")
+    p.add_argument("--qm_n_samples", type=int, default=500,
+                   help="Max QM questions to use (all available ~500; "
+                        "separate from --n_per_class to allow explicit imbalance control).")
     p.add_argument("--n_per_class", type=int, default=5000)
     p.add_argument("--val_frac", type=float, default=0.10)
     p.add_argument("--seed", type=int, default=42)
