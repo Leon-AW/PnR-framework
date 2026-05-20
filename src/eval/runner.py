@@ -30,6 +30,7 @@ from .dataset import (
     build_counterfact_conflict_dataset,
     build_local_json_dataset,
     build_qm_conflict_dataset,
+    build_qm_stable_dataset,
     build_situated_qa_dataset,
     build_sqa_train_dataset,
     build_triviaqa_control_dataset,
@@ -69,7 +70,7 @@ def _normalised_value_present(value: str, normalised_text: str) -> bool:
 # All valid split names
 VALID_SPLITS: set[str] = (
     {"base", "temporal", "local", "cf_conflict", "cf_control", "sqa_train",
-     "qm_conflict", "qm_control"}
+     "qm_conflict", "qm_stable", "qm_control"}
     | {f"geo_{c}" for c in KNOWN_GEO_ADAPTERS}
 )
 
@@ -125,7 +126,7 @@ class EvalConfig:
     # D_control) are unaffected and keep the `max_new_tokens` short config.
     # A list (not a set) so `dataclasses.asdict` → `json.dump` serialises it
     # cleanly into report.json's config block.
-    long_form_splits: list[str] = field(default_factory=lambda: ["qm_conflict"])
+    long_form_splits: list[str] = field(default_factory=lambda: ["qm_conflict", "qm_stable"])
     long_form_max_new_tokens: int = 512
     temperature: float = 0.1
     do_sample: bool = False
@@ -179,9 +180,11 @@ class EvalConfig:
     sqa_deval_path: str | None = None          # data/sqa_deval.json
     cf_adapter_name: str = "patch_cf_main"  # Adapter the router should pick for D_conflict
     cf_split_name: str = "test"  # Which split of counterfact_eval.json to use ('train' or 'test')
-    # AIT QM D_eval (qm_conflict + qm_control splits)
+    # AIT QM D_eval (qm_stable + qm_conflict + qm_control splits)
     qm_conflict_path: str | None = None   # data/qm_conflict_pairs.json
+    qm_stable_path: str | None = None     # data/qm_stable_facts.json
     qm_adapter_name: str = "patch_qm_current"  # Adapter the router should pick for qm_conflict
+    qm_base_adapter_name: str = "base_qm"  # Adapter the router should pick for qm_stable
     # Log-probability scoring (ROME / MEMIT-style ESR). When enabled, the
     # runner asks the active pipeline for a teacher-forced log P(target |
     # prompt) on every sample, after generation. Reports include:
@@ -1056,17 +1059,20 @@ class EvalRunner:
             return out
 
         if sample.split == "qm_conflict":
-            # Mirrors cf_conflict, but the targets are full long-form QM
-            # answers: ``answer_new`` (gold — the current fact the patch must
-            # assert) vs ``answer_old`` (the contradicting earlier revision).
-            # Length-normalised so this near-equal-length pair is compared
-            # per-token, not penalised for a few extra markdown-table tokens.
-            target_new = sample.gold_answers[0] if sample.gold_answers else ""
-            target_true = (sample.metadata or {}).get("answer_old") or ""
+            # Score the changed value (`new_value` vs `old_value`) at the edit
+            # position, mirroring the CF `target_new`/`target_true` convention.
+            # Scoring the full `answer_new`/`answer_old` documents was diluting
+            # the single changed token across ~1000 tokens — and under
+            # always-on Source-Replay both documents become near-perfectly
+            # copyable from the in-context retrieved chunks, collapsing the
+            # signal further (May 19 diagnosis).
+            meta = sample.metadata or {}
+            target_new = (meta.get("new_value") or "").strip()
+            target_true = (meta.get("old_value") or "").strip()
             if not target_new or not target_true:
                 return out
             try:
-                kwargs: dict[str, Any] = {"length_normalised": True}
+                kwargs: dict[str, Any] = {}
                 if self.config.no_adapter:
                     kwargs["skip_routing"] = True
                 elif self.config.monolithic_adapter:
@@ -1081,7 +1087,7 @@ class EvalRunner:
             except Exception as exc:
                 logger.warning(
                     "score_targets failed for qm_conflict sample (id=%s): %s",
-                    (sample.metadata or {}).get("id"),
+                    meta.get("id"),
                     exc,
                 )
                 return out
@@ -1390,6 +1396,16 @@ class EvalRunner:
                         samples = build_triviaqa_control_dataset(
                             triviaqa_path=self.config.triviaqa_dcontrol_path,
                             n_samples=self.config.n_samples,
+                        )
+                    elif split_name == "qm_stable":
+                        if not self.config.qm_stable_path:
+                            raise ValueError(
+                                "'qm_stable' requires --qm_stable_path"
+                            )
+                        samples = build_qm_stable_dataset(
+                            qm_stable_path=self.config.qm_stable_path,
+                            n_samples=self.config.n_samples,
+                            qm_adapter_name=self.config.qm_base_adapter_name,
                         )
                     elif split_name == "qm_conflict":
                         if not self.config.qm_conflict_path:

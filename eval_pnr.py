@@ -314,10 +314,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--qm_stable_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to data/qm_stable_facts.json. Required when --eval_sets "
+            "includes 'qm_stable'."
+        ),
+    )
+    parser.add_argument(
         "--qm_adapter_name",
         type=str,
         default="patch_qm_current",
         help="Adapter name tagged on qm_conflict samples (used by router).",
+    )
+    parser.add_argument(
+        "--qm_base_adapter_name",
+        type=str,
+        default="base_qm",
+        help="Adapter name tagged on qm_stable samples (used by router).",
     )
 
     # MORPHEUS architecture
@@ -482,6 +497,9 @@ def main() -> None:
     if "qm_conflict" in args.eval_sets and not args.qm_conflict_path:
         logger.error("--eval_sets includes 'qm_conflict' but no --qm_conflict_path provided")
         sys.exit(1)
+    if "qm_stable" in args.eval_sets and not args.qm_stable_path:
+        logger.error("--eval_sets includes 'qm_stable' but no --qm_stable_path provided")
+        sys.exit(1)
     if "qm_control" in args.eval_sets and not args.triviaqa_dcontrol_path:
         logger.error("--eval_sets includes 'qm_control' but no --triviaqa_dcontrol_path provided")
         sys.exit(1)
@@ -519,7 +537,9 @@ def main() -> None:
         cf_adapter_name=args.cf_adapter_name,
         cf_split_name=args.cf_split_name,
         qm_conflict_path=args.qm_conflict_path,
+        qm_stable_path=args.qm_stable_path,
         qm_adapter_name=args.qm_adapter_name,
+        qm_base_adapter_name=args.qm_base_adapter_name,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         do_sample=False,

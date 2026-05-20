@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:a10080gb:1
-#SBATCH --nodelist=gruenau10
+#SBATCH --nodelist=gruenau9
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=08:00:00
@@ -13,7 +13,7 @@
 #SBATCH --mail-type=END,FAIL
 
 # ==============================================================================
-# AIT QM D_eval — ESR (qm_conflict) + Forgetting Rate (qm_control)
+# AIT QM D_eval — Retention (qm_stable) + ESR (qm_conflict) + Forgetting Rate (qm_control)
 #
 # Runs on gruenau10 (3x A100-80GB), like the CounterFact / SituatedQA D_evals.
 # The AIT QM dataset is semi-synthetic and carries no sensitive data once built,
@@ -21,8 +21,10 @@
 # scripts/build_qm_conflict_pairs.py, which reads the proprietary data/DE source
 # corpus, is AIT-bound; the generated conflict pairs are not.)
 #
-# Evaluates a system (mode set by the caller — see Usage) on:
-#   qm_conflict  — 500 semi-synthetic QM conflict pairs  (measures R1 / ESR)
+# Evaluates a system (mode set by the caller — see Usage) on the 3-bucket
+# SQA-style D_eval design (May 19 redesign):
+#   qm_stable    — 500 QM facts unchanged 2015→2025      (expected adapter: base_qm)
+#   qm_conflict  — 500 semi-synthetic QM conflict pairs  (expected adapter: patch_qm_current — measures R1 / ESR)
 #   qm_control   — 1000 TriviaQA D_control records       (measures R2 / forgetting)
 #
 # QM answers are long free-form documents, so the runner auto-applies a
@@ -52,7 +54,7 @@
 #       --similarity_threshold 0.45 \
 #       --domain_classifier_path checkpoints/domain_classifier \
 #       --domain_confidence_threshold 0.7 --domain_fallback_threshold 0.30 \
-#       --run_name pnr_qm_routed --output_dir eval_results/qm_deval_pnr
+#       --run_name pnr_qm_routed_v3 --output_dir eval_results/qm_deval_pnr_v3
 # ==============================================================================
 
 set -euo pipefail
@@ -74,10 +76,12 @@ echo "Args    : $*"
 echo "======================================================================"
 
 python eval_pnr.py \
-    --eval_sets qm_conflict qm_control \
+    --eval_sets qm_stable qm_conflict qm_control \
     --n_samples 1000 \
+    --qm_stable_path data/qm_stable_facts.json \
     --qm_conflict_path data/qm_conflict_pairs.json \
     --triviaqa_dcontrol_path data/triviaqa_dcontrol.json \
+    --qm_base_adapter_name base_qm \
     --qm_adapter_name patch_qm_current \
     --quantization int4 \
     --max_new_tokens 256 \

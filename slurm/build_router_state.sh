@@ -43,8 +43,9 @@ python scripts/build_router_state.py \
     --max_samples 5000 \
     --similarity_threshold 0.45 \
     --cf_data_path data/counterfact_train.jsonl \
-    --qm_old_data_path data/qm_train_old.jsonl \
+    --qm_old_data_path data/qm_stable_anchors.jsonl \
     --qm_new_data_path data/qm_train.jsonl \
+    --qm_num_clusters 150 \
     --calibration_neg_path data/triviaqa_dcalibration.json \
     --in_domain_percentile 5.0 \
     --neg_percentile 99.0 \

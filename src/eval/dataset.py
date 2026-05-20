@@ -528,3 +528,70 @@ def build_qm_conflict_dataset(
         f"(qm_adapter={qm_adapter_name!r})"
     )
     return samples
+
+
+def build_qm_stable_dataset(
+    qm_stable_path: str,
+    n_samples: int,
+    qm_adapter_name: str = "base_qm",
+    random_seed: int = D_EVAL_SAMPLING_SEED,
+) -> list[EvalSample]:
+    """Build D_stable eval samples from ``data/qm_stable_facts.json``.
+
+    These are facts that have NOT changed — the base_qm adapter should answer
+    them correctly. Used to measure backward-interference (forgetting) when a
+    new patch is applied.
+
+    Args:
+        qm_stable_path: Path to ``data/qm_stable_facts.json``.
+        n_samples: Maximum number of records to load.
+        qm_adapter_name: Adapter the router should route to.
+        random_seed: RNG seed for reproducible subsampling.
+
+    Returns:
+        List of EvalSample instances with ``split='qm_stable'``.
+    """
+    path = Path(qm_stable_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"QM stable facts file not found: {path}."
+        )
+    with open(path, encoding="utf-8") as f:
+        records = json.load(f)
+
+    if n_samples < len(records):
+        rng = random.Random(random_seed)
+        selected_indices = sorted(rng.sample(range(len(records)), n_samples))
+        full_pool_size = len(records)
+        records = [records[i] for i in selected_indices]
+        logger.info(
+            f"D_stable (QM): uniform-random sample of {n_samples} from "
+            f"{full_pool_size} records (seed={random_seed})"
+        )
+
+    samples: list[EvalSample] = []
+    for rec in records:
+        question = rec.get("question")
+        answer = rec.get("answer")
+        if not question or not answer:
+            continue
+        samples.append(EvalSample(
+            question=question.strip(),
+            gold_answers=[answer.strip()],
+            expected_adapter=qm_adapter_name,
+            split="qm_stable",
+            metadata={
+                "id": rec.get("id"),
+                "language": rec.get("language"),
+                "intention_category": rec.get("intention_category"),
+                "complexity_level": rec.get("complexity_level"),
+                "source_file": rec.get("source_file"),
+                "source": "qm_stable",
+            },
+        ))
+
+    logger.info(
+        f"Built {len(samples)} D_stable (QM) samples from {path} "
+        f"(qm_adapter={qm_adapter_name!r})"
+    )
+    return samples
