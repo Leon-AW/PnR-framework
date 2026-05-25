@@ -34,13 +34,16 @@ METHODS: list[dict[str, str | None]] = [
         # standardised SQA D_eval (1 000 train + D_control, May 2)
         "situated_qa":  "frozen_base_sqa_deval",
         "counterfact":  "frozen_base_deval_v2",
-        "ait_qm":       "qm_deval_frozen/pnr_qm_frozen",
+        # v3 (May 20, job 362311) — 3-bucket QM D_eval (stable/conflict/control)
+        "ait_qm":       "qm_deval_frozen_v3/pnr_qm_frozen_v3",
     },
     {
         "name":         "X-LoRA",
         # merged after job 352297 (cf_control) completed May 3
         "situated_qa":  "xlora_sqa_deval",
         "counterfact":  "xlora_v3",
+        # v3 QM rerun (May 23, job 362979)
+        "ait_qm":       "qm_deval_xlora_v3/pnr_qm_xlora_v3",
     },
     {
         "name":         "Parallel (single-stage)",
@@ -53,30 +56,42 @@ METHODS: list[dict[str, str | None]] = [
         "name":         "Parallel (multi-expert + 2-stage)",
         "situated_qa":  "parallel_phase5_sqa_deval",
         "counterfact":  "parallel_phase5_cf_deval",
+        # v3 QM (May 21, job 362314)
+        "ait_qm":       "qm_deval_parallel_v3/pnr_qm_parallel_v3",
     },
     {
         "name":         "RECIPE",
         "situated_qa":  "recipe_sqa_deval",
         "counterfact":  "recipe_deval_v2",
+        # v3 QM rerun (May 25, job 363718) — re-cloned external/RECIPE,
+        # retrained QM ckpt epoch-1000-i-63000-ema_loss-1.3794, evaluated
+        # via QM-aware long-form path in src/baselines/recipe_official.py.
+        "ait_qm":       "qm_deval_recipe_v3/recipe_qm_deval_v3",
     },
     {
         "name":         "Monolithic LoRA",
         "situated_qa":  "monolithic_sqa_deval",
         "counterfact":  "monolithic_deval_v2",
-        # QM monolithic = patch_qm_current only (new facts, no base_qm)
-        "ait_qm":       "qm_deval_v2/pnr_qm_deval_v2",
+        # v3 QM monolithic (May 22, job 362967) = patch_qm_current only
+        # over the 3-bucket 2000-sample design.
+        "ait_qm":       "qm_deval_monolithic_v3/pnr_qm_monolithic_v3",
     },
     {
         "name":         "Monolithic LoRA (sequential QM)",
         "situated_qa":  None,
         "counterfact":  None,
-        # QM sequential monolithic = old→new, demonstrates catastrophic forgetting
+        # Legacy May-17 sequential-training row (old→new on same adapter).
+        # Kept as a reference; the v3 Monolithic row above is the canonical
+        # 2000-sample number on the 3-bucket design.
         "ait_qm":       "qm_deval_monolithic/pnr_qm_monolithic",
     },
     {
         "name":         "LoRA + RAG",
         "situated_qa":  "lora_rag_sqa_deval",
         "counterfact":  "lora_rag_deval_v2",
+        # v3 QM rerun (May 22, job 362968) — qm_train.jsonl chat-message
+        # _build_index fix landed in src/baselines/lora_rag.py.
+        "ait_qm":       "qm_deval_lora_rag_v3/pnr_qm_lora_rag_v3",
     },
     {
         "name":         "PnR Routing (single-stage)",
@@ -89,17 +104,25 @@ METHODS: list[dict[str, str | None]] = [
         "name":         "PnR Routing (multi-expert + 2-stage)",
         "situated_qa":  "pnr_phase5_sqa_deval",
         "counterfact":  "pnr_phase5_cf_deval",
-        "ait_qm":       "qm_deval_pnr/pnr_qm_routed",
+        # v3 QM (May 20, job 362310) — 3-bucket, 2000 samples, k=150 router state
+        "ait_qm":       "qm_deval_pnr_v3/pnr_qm_routed_v3",
     },
     {
         "name":         "MORPHEUS (τ, bypass)",
         "situated_qa":  "morpheus_sqa_deval",
         "counterfact":  "morpheus_deval_v3",
+        # v3 QM (May 23, job 363704) — morpheus_state_qm/ seeded from
+        # qm_train.jsonl + qm_train_base.jsonl (1000 unique records).
+        "ait_qm":       "qm_deval_morpheus_v3/pnr_qm_morpheus_v3",
     },
     {
         "name":         "MORPHEUS (τ, no-bypass)",
         "situated_qa":  "morpheus_sqa_deval",
         "counterfact":  "morpheus_nobypass_deval_v3",
+        # v3 QM nobypass ablation (May 23, job 363705) — same KS, but
+        # --morpheus_direct_answer_threshold 1.1 forces routing through
+        # the QM specialist (no KS short-circuit).
+        "ait_qm":       "qm_deval_morpheus_nobypass_v3/pnr_qm_morpheus_nobypass_v3",
     },
     {
         "name":         "MORPHEUS (clf, bypass)",

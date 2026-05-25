@@ -2,20 +2,27 @@
 """Seed the MORPHEUS KnowledgeStore from training data.
 
 The graduated-factuality protocol (System 5) is a no-op unless the store
-contains records. This script populates
-``morpheus_state/knowledge_store/records.json`` from the same sources that
-trained the LoRA adapters:
+contains records. This script populates a ``knowledge_store/records.json``
+from the same sources that trained the LoRA adapters:
 
 - SituatedQA streams (base, temporal, geo_<country>) for each registered
   adapter domain — mirrors ``src/data/loader.py`` streams.
 - CounterFact training pairs (``data/counterfact_train.jsonl``) when the
   ``patch_cf_main`` adapter is in play.
+- AIT QM SFT chat-message JSONL (``data/qm_train.jsonl`` for the patch
+  domain and ``data/qm_train_base.jsonl`` for the base domain) when one
+  of the QM adapters is in play. Long-form German answers are stored
+  verbatim as ``object_value`` (same no-triple pattern as SituatedQA).
 
 Records are embedded with the same sentence-transformer used by the
 PrototypeRouter so that retrieval operates in a consistent similarity
 space, and written to the canonical ``store_dir`` so that MORPHEUS picks
 them up at inference time (after the ``__init__`` auto-load patch in
 ``src/morpheus/inference.py``).
+
+The three domain blocks (SQA, CF, QM) can be enabled/disabled independently
+via ``--skip_sqa`` / ``--skip_counterfact`` / by omitting the QM paths, so a
+domain-specific KS (e.g. ``morpheus_state_qm/``) can be built in isolation.
 """
 from __future__ import annotations
 
@@ -161,6 +168,81 @@ def collect_situated_qa(
     return facts
 
 
+def collect_qm(path: Path, domain: str, exclude_ids: set[str] | None = None) -> list[Fact]:
+    """Return Facts from an AIT QM SFT JSONL (chat-message format).
+
+    QM training records are ``{"id": ..., "messages": [{"role": "user",
+    "content": <question>}, {"role": "assistant", "content": <answer>}],
+    ...}``. Like SituatedQA, there is no atomic (subject, predicate,
+    object) triple — the full question plays the role of subject and the
+    assistant message (a long-form German markdown answer) is the
+    object_value. The KS bypass mechanism returns ``object_value``
+    verbatim, which is exactly what the QM eval expects.
+
+    ``domain`` is the label we want on the resulting KnowledgeRecord
+    (e.g. ``"qm_patch"`` for ``qm_train.jsonl`` or ``"qm_base"`` for
+    ``qm_train_base.jsonl``).
+
+    ``exclude_ids`` lets the caller drop records whose ``id`` is already
+    represented by a more-current source. Critical for QM: qm_train_base
+    contains the OLD (pre-edit) answer for conflict items, while
+    qm_train contains the NEW (post-edit) answer for the same IDs. Both
+    seeded with the same lookup_text → identical embeddings → tie-break
+    in search returns one of them arbitrarily. Excluding the conflict
+    IDs from the base pass guarantees the KS holds one answer per
+    question (conflict→new, stable→base).
+    """
+    facts: list[Fact] = []
+    n_scanned = 0
+    n_excluded = 0
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            n_scanned += 1
+            rec = json.loads(line)
+            if exclude_ids is not None and rec.get("id") in exclude_ids:
+                n_excluded += 1
+                continue
+            messages = rec.get("messages") or []
+            q = next(
+                (m.get("content", "").strip() for m in messages if m.get("role") == "user"),
+                "",
+            )
+            a = next(
+                (m.get("content", "").strip() for m in messages if m.get("role") == "assistant"),
+                "",
+            )
+            if not q or not a:
+                continue
+            facts.append(Fact(
+                domain=domain,
+                lookup_text=q,
+                subject=q,
+                predicate="— answer:",
+                object_value=a,
+            ))
+    logger.info("  qm/%s: kept %d records (from %d scanned, %d excluded, %s)",
+                domain, len(facts), n_scanned, n_excluded, path)
+    return facts
+
+
+def _collect_ids(path: Path) -> set[str]:
+    """Return the set of record IDs in a chat-message JSONL file."""
+    ids: set[str] = set()
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            rid = rec.get("id")
+            if rid:
+                ids.add(rid)
+    return ids
+
+
 def collect_counterfact(path: Path, limit: int | None) -> list[Fact]:
     """Return Facts from CounterFact preserving the (subject, relation, object) triple.
 
@@ -281,6 +363,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--counterfact_limit", type=int, default=None,
                    help="Cap on CounterFact records (default: all).")
     p.add_argument("--skip_counterfact", action="store_true")
+    p.add_argument("--skip_sqa", action="store_true",
+                   help="Skip SituatedQA collection (useful for QM-only builds).")
+    p.add_argument("--qm_train_path", default=None,
+                   help="Path to qm_train.jsonl (chat-message SFT data for "
+                        "patch_qm_current). Records seeded under domain 'qm_patch'.")
+    p.add_argument("--qm_train_base_path", default=None,
+                   help="Path to qm_train_base.jsonl (chat-message SFT data for "
+                        "base_qm). Records seeded under domain 'qm_base'.")
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--cpu", action="store_true", help="Force CPU encoding.")
     p.add_argument("--log_level", default="INFO")
@@ -296,12 +386,16 @@ def main() -> None:
     else:
         include_splits = set(args.splits)
 
-    logger.info("Collecting SituatedQA facts ...")
-    facts = collect_situated_qa(
-        n_per_split=args.n_per_split,
-        skip_first=args.skip_first,
-        include_splits=include_splits,
-    )
+    facts: list[Fact] = []
+    if not args.skip_sqa:
+        logger.info("Collecting SituatedQA facts ...")
+        facts.extend(collect_situated_qa(
+            n_per_split=args.n_per_split,
+            skip_first=args.skip_first,
+            include_splits=include_splits,
+        ))
+    else:
+        logger.info("Skipping SituatedQA collection (--skip_sqa)")
 
     if not args.skip_counterfact:
         cf_path = Path(args.counterfact_path)
@@ -310,6 +404,32 @@ def main() -> None:
             facts.extend(collect_counterfact(cf_path, args.counterfact_limit))
         else:
             logger.warning("CounterFact path %s not found — skipping.", cf_path)
+
+    # The QM patch (qm_train.jsonl) overrides the QM base (qm_train_base.jsonl)
+    # for any shared IDs — qm_train_base carries the OLD answer for conflict
+    # items, qm_train carries the NEW answer. Seeding both unfiltered would
+    # leave both records in the KS with identical embeddings (tie-break
+    # arbitrary), causing bypass to occasionally return the old value.
+    qm_patch_ids: set[str] = set()
+    if args.qm_train_path:
+        qm_patch_path = Path(args.qm_train_path)
+        if qm_patch_path.exists():
+            logger.info("Collecting QM facts from %s (domain=qm_patch) ...", qm_patch_path)
+            facts.extend(collect_qm(qm_patch_path, "qm_patch"))
+            qm_patch_ids = _collect_ids(qm_patch_path)
+        else:
+            logger.warning("QM path %s not found — skipping qm_patch.", qm_patch_path)
+
+    if args.qm_train_base_path:
+        qm_base_path = Path(args.qm_train_base_path)
+        if qm_base_path.exists():
+            logger.info(
+                "Collecting QM facts from %s (domain=qm_base, excluding %d patch IDs) ...",
+                qm_base_path, len(qm_patch_ids),
+            )
+            facts.extend(collect_qm(qm_base_path, "qm_base", exclude_ids=qm_patch_ids))
+        else:
+            logger.warning("QM path %s not found — skipping qm_base.", qm_base_path)
 
     if not facts:
         raise SystemExit("No facts collected. Aborting.")
@@ -341,7 +461,10 @@ def main() -> None:
         "n_records": store.num_records,
         "n_per_split": args.n_per_split,
         "skip_first": args.skip_first,
+        "sqa_included": not args.skip_sqa,
         "counterfact_included": not args.skip_counterfact,
+        "qm_train_path": args.qm_train_path,
+        "qm_train_base_path": args.qm_train_base_path,
         "domain_counts": {},
     }
     for r in records:

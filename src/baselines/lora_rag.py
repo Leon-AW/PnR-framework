@@ -154,11 +154,20 @@ class LoRARAGInference:
             else:
                 raw = json.load(f)
 
-        self._qa_pairs = [
-            {"question": item["question"], "answer": item["answer"]}
-            for item in raw
-            if "question" in item and "answer" in item
-        ]
+        self._qa_pairs = []
+        for item in raw:
+            # Flat schema: {"question": ..., "answer": ...} (CF / SQA train files).
+            if "question" in item and "answer" in item:
+                self._qa_pairs.append({"question": item["question"], "answer": item["answer"]})
+                continue
+            # Chat-message schema: {"messages": [{"role": "user", ...}, {"role": "assistant", ...}]}
+            # (QM SFT train files). Take the first user/assistant turn as the QA pair.
+            messages = item.get("messages")
+            if messages:
+                question = next((m.get("content") for m in messages if m.get("role") == "user"), None)
+                answer = next((m.get("content") for m in messages if m.get("role") == "assistant"), None)
+                if question and answer:
+                    self._qa_pairs.append({"question": question, "answer": answer})
         if not self._qa_pairs:
             raise ValueError(f"No valid QA pairs found in {self.qa_pairs_path}")
 

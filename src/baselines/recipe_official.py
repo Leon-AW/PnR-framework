@@ -148,7 +148,7 @@ class RECIPEOfficialInference:
         self._ensure_loaded()
         self._editor.restore_to_original_model()
 
-    def generate(self, query: str) -> RECIPEOfficialResult:
+    def generate(self, query: str, generation_config: Any = None) -> RECIPEOfficialResult:
         self._ensure_loaded()
         assert self._editor is not None
         assert self._tokenizer is not None
@@ -166,8 +166,18 @@ class RECIPEOfficialInference:
         input_ids = tok["input_ids"].to(llm_device)
         attention_mask = tok["attention_mask"].to(llm_device)
 
-        # Cap at 30 tokens: RECIPE edits are factoid completions, not essays.
-        max_new = min(self.max_new_tokens, 30)
+        # Long-form path: when the runner passes a generation_config (qm_conflict /
+        # qm_stable splits), honor its max_new_tokens (e.g. 512) and skip the
+        # first-line truncation downstream — QM answers are multi-paragraph
+        # markdown documents where the changed `new_value` is often buried after
+        # the opening sentence.
+        long_form = generation_config is not None
+        if long_form:
+            max_new = int(getattr(generation_config, "max_new_tokens", self.max_new_tokens))
+        else:
+            # Cap at 30 tokens: short factoid edits (SQA / CF). Essays here
+            # signal the instruct prior winning over the edit — wrong answer.
+            max_new = min(self.max_new_tokens, 30)
 
         # use_cache=False is REQUIRED. RECIPE's begin_layer hook prepends
         # prompt_token_n continuous prompts to the input embeddings on the
@@ -196,10 +206,12 @@ class RECIPEOfficialInference:
         response = self._tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=True).strip()
 
         # Completion semantics: first line / first sentence is the answer.
-        for sep in ("\n", "."):
-            if sep in response:
-                response = response[: response.index(sep)].strip()
-                break
+        # Skip for long-form QM splits — the runner keeps the full document.
+        if not long_form:
+            for sep in ("\n", "."):
+                if sep in response:
+                    response = response[: response.index(sep)].strip()
+                    break
 
         # Introspect whether the editor injected a prompt for this query
         adopted = getattr(self._editor, "adopted_prompts", [])

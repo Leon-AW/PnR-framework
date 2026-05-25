@@ -489,6 +489,14 @@ class EvalRunner:
         )
         if self.config.morpheus_state_dir:
             morpheus_config.state_dir = self.config.morpheus_state_dir
+            # MorpheusInference auto-loads records.json from
+            # knowledge_store.store_dir, NOT from MorpheusConfig.state_dir.
+            # Without this propagation, --morpheus_state_dir silently leaves
+            # the KS pointing at the default "morpheus_state/knowledge_store"
+            # — which would load CF triples into a QM run (or vice versa).
+            morpheus_config.knowledge_store.store_dir = str(
+                Path(self.config.morpheus_state_dir) / "knowledge_store"
+            )
         morpheus_config.knowledge_store.direct_answer_threshold = (
             self.config.morpheus_direct_answer_threshold
         )
@@ -792,7 +800,6 @@ class EvalRunner:
         long_form_cfg = None
         if sample.split in self.config.long_form_splits:
             if (self.config.parallel_orchestrator
-                    or self.config.recipe_official_checkpoint
                     or self.config.lora_rag_adapter
                     or self.config.xlora_checkpoint):
                 logger.warning(
@@ -815,7 +822,10 @@ class EvalRunner:
         if self.config.parallel_orchestrator:
             result = pipeline.generate(query=sample.question)
         elif self.config.recipe_official_checkpoint:
-            result = pipeline.generate(query=sample.question)
+            result = pipeline.generate(
+                query=sample.question,
+                generation_config=long_form_cfg,
+            )
         elif self.config.lora_rag_adapter:
             result = pipeline.generate(query=sample.question)
         elif self.config.xlora_checkpoint:

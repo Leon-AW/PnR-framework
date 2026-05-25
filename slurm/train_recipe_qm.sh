@@ -1,56 +1,63 @@
 #!/bin/bash
-#SBATCH --job-name=train_recipe_qm
-#SBATCH --partition=shared
-#SBATCH --account=aitf
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --job-name=recipe_qm
+#SBATCH --partition=longgpu
+#SBATCH --gres=gpu:a10080gb:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
-#SBATCH --gres=gpu:2g.48gb:1
-#SBATCH --time=28:00:00
-#SBATCH --output=logs/train_recipe_qm_%j.out
-#SBATCH --error=logs/train_recipe_qm_%j.err
+#SBATCH --mem=64G
+#SBATCH --time=2-00:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --exclude=gruenau9
 
 # ==============================================================================
-# Meta-train RECIPE on AIT QM conflict pairs.
+# RECIPE Baseline — QM Meta-Training (official repo, gruenau)
 #
-# Trains the Knowledge Representation Module (KRM) and Prompt Tokens (PT)
-# so RECIPE can store/retrieve QM-style factual edits at inference time.
+# Runs the EMNLP-2024 author implementation on Mistral-7B-Instruct-v0.3
+# meta-trained on the AIT QM conflict pairs. Mirrors slurm/train_recipe_official.sh
+# (the SituatedQA/zSRE counterpart) — same env, same node convention.
 #
-# Prerequisite (CPU, <1 s):
-#   python scripts/build_recipe_qm_data.py
+# Prereqs (already in place):
+#   - external/RECIPE -> /vol/tmp/wagnerql/RECIPE (symlink)
+#   - external/RECIPE/configs/recipe/mistral-7b.yaml
+#   - external/RECIPE/utils/utils.py mistral dispatch
+#   - editors/recipe/data.py 'qm' branch (dispatches to __zsre__)
+#   - external/RECIPE/data/meta-train/qm/qm_train.json (build via
+#     `python scripts/build_recipe_qm_data.py` if absent)
 #
-# Run inside existing allocation (recommended — reuse job 10427):
-#   srun --jobid=10427 --overlap --job-name=recipe_qm --time=27:00:00 bash -c '
-#     export CUDA_VISIBLE_DEVICES=MIG-67a4fc8d-4980-5ba3-8261-8dcb9d94d1d9
-#     bash slurm/train_recipe_qm.sh' > logs/train_recipe_qm_srun.log 2>&1 &
-#
-# Or submit as a new SLURM job:
-#   sbatch slurm/train_recipe_qm.sh
+# Notes:
+#   - Mistral is loaded at bf16; int4/int8 not supported (prompt injection
+#     hook requires gradients through inputs_embeds).
+#   - Checkpoints land under
+#     /vol/tmp/wagnerql/RECIPE/train_records/recipe/mistral-7b/<timestamp>/checkpoints/.
 # ==============================================================================
 
 set -euo pipefail
 
-REPO_ROOT="/gpfs/adafs/home/leon.wagner/PnR-framework"
-PYTHON="/gpfs/adafs/home/leon.wagner/miniconda3/envs/pnr/bin/python"
-RECIPE_ROOT="$REPO_ROOT/external/RECIPE"
+cd "${SLURM_SUBMIT_DIR}"
 
-export HF_HUB_OFFLINE=1
+CONDA_BASE=/usr/local/anaconda3-2024.06
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate pnr
 
-cd "$RECIPE_ROOT"
+export TQDM_MININTERVAL=10
+export TQDM_NCOLS=100
 
-echo "Node: $(hostname)  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+echo "======================================================================"
+echo "Job ID       : ${SLURM_JOB_ID}"
+echo "Node         : ${SLURMD_NODENAME}"
+echo "Started      : $(date)"
+echo "======================================================================"
 
-# Build training data if not present
-if [ ! -f "$RECIPE_ROOT/data/meta-train/qm/qm_train.json" ]; then
-    echo "Building RECIPE QM training data..."
-    cd "$REPO_ROOT"
-    "$PYTHON" scripts/build_recipe_qm_data.py
-    cd "$RECIPE_ROOT"
+# Regenerate QM training data if missing
+if [ ! -f external/RECIPE/data/meta-train/qm/qm_train.json ]; then
+    python scripts/build_recipe_qm_data.py
 fi
 
-"$PYTHON" train_recipe.py \
-    --model_name mistral-7b \
-    --data_name qm \
-    --batch_size 2
+# Official repo uses relative paths — run from its root
+cd external/RECIPE
+python train_recipe.py -mn mistral-7b -dn qm "$@"
+
+echo "======================================================================"
+echo "Finished : $(date)"
+echo "======================================================================"
