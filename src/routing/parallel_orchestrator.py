@@ -182,6 +182,30 @@ Rules:
 
 Final answer:"""
 
+SYNTHESIS_PROMPT_TEMPLATE_LONG_FORM = """\
+You are an expert knowledge resolver. You have received candidate answers \
+from multiple specialized knowledge sources, each trained on a different \
+context or time period.
+
+Question: {query}
+
+--- Source Answers ---
+{source_answers}
+--- End of Source Answers ---
+
+--- Retrieved Evidence ---
+{retrieved_evidence}
+--- End of Retrieved Evidence ---
+
+Rules:
+1. Output the answer IN FULL. Do not summarize. Do not point to where the answer lives — restate the content directly.
+2. Preserve markdown structure: headers, bullet lists, numbered steps, quoted policy text, and section references must appear verbatim from the chosen source.
+3. If sources conflict, prefer the source with the LATEST training date. Copy that source's content verbatim; do not blend with older sources.
+4. If retrieved evidence contradicts a source's answer, prefer the evidence and quote the relevant passage in full.
+5. Do NOT use phrases like "Previously X, but...", "As of [date]...", or "Both X and Y".
+
+Final answer:"""
+
 # Sentinel used when a synthesis call has no retrieved evidence (e.g.
 # Source-Replay disabled at the router level or all chunks below
 # `retrieval_threshold`). Kept short so the Resolver doesn't waste budget
@@ -238,6 +262,7 @@ class ParallelOrchestrator:
         query_planner_mode: str = "similarity",
         max_adapters: int = 5,
         synthesis_max_new_tokens: int = 512,
+        synthesis_max_new_tokens_long_form: int = 1536,
         use_gpu: bool = True,
         system_prompt: str | None = None,
         warm_context: bool = False,
@@ -295,11 +320,14 @@ class ParallelOrchestrator:
 
         # Cap the synthesis budget at the per-call generation budget so a
         # CF eval (max_new_tokens=32) doesn't get a 512-token Resolver
-        # pass that emits a paragraph (Change 4 fix).
+        # pass that emits a paragraph (Change 4 fix). For long-form splits
+        # the cap is lifted at call time inside `synthesize()` so the
+        # Resolver can reproduce multi-paragraph QM answers in full.
         effective_synth_tokens = min(
             synthesis_max_new_tokens, self.generation_config.max_new_tokens
         )
         self.synthesis_max_new_tokens = effective_synth_tokens
+        self.synthesis_max_new_tokens_long_form = synthesis_max_new_tokens_long_form
 
         self._synthesis_config = GenerationConfig(
             max_new_tokens=effective_synth_tokens,
@@ -672,6 +700,7 @@ class ParallelOrchestrator:
         query: str,
         selected_adapters: list[AdapterMatch],
         query_embedding: np.ndarray | None = None,
+        long_form: bool = False,
     ) -> tuple[dict[str, str], dict[str, float], dict[str, list[RetrievedChunk]]]:
         """Execute generation through each selected adapter sequentially.
 
@@ -735,18 +764,41 @@ class ParallelOrchestrator:
                 query=query, retrieved_context=retrieved_context,
             )
 
-            # Generate
+            # Generate. Long-form splits widen the per-adapter budget so
+            # multi-paragraph QM answers reach the Resolver intact, and
+            # clear the short-answer stop sequences ("\n", ".", "!", "?")
+            # — otherwise the first newline after a markdown header kills
+            # generation, leaving the Resolver with a stub like
+            # "**Responsible Persons:**" instead of the full document.
+            per_adapter_gen_config = self.generation_config
+            if long_form:
+                from src.inference import GenerationConfig
+                per_adapter_gen_config = GenerationConfig(
+                    max_new_tokens=max(
+                        self.generation_config.max_new_tokens,
+                        self.synthesis_max_new_tokens_long_form // 2,
+                    ),
+                    temperature=self.generation_config.temperature,
+                    top_p=self.generation_config.top_p,
+                    do_sample=self.generation_config.do_sample,
+                    repetition_penalty=self.generation_config.repetition_penalty,
+                    stop_sequences=(),
+                )
             model, tokenizer = self.llm.get_inference_components()
             t_start = time.perf_counter()
             raw_output = generate_text(
-                model, tokenizer, prompt, self.generation_config, self.use_gpu
+                model, tokenizer, prompt, per_adapter_gen_config, self.use_gpu
             )
             t_end = time.perf_counter()
 
-            # Strip <think> blocks + short-answer truncation; matches the
-            # eval-time ``parse_model_output`` so the strings the Resolver
-            # synthesises are aligned with what EM scoring will see.
-            parsed = parse_model_output(raw_output)
+            # Strip <think> blocks. For short-answer splits, also collapse
+            # to first sentence so the Resolver sees the same string EM
+            # will. For long-form splits, keep the full multi-paragraph
+            # answer — that IS the answer the Resolver must reproduce.
+            parsed = parse_model_output(
+                raw_output,
+                truncate_to_short_answer=not long_form,
+            )
             adapter_outputs[adapter_id] = parsed
             latencies[adapter_id] = (t_end - t_start) * 1000.0
 
@@ -801,6 +853,7 @@ class ParallelOrchestrator:
         adapter_outputs: dict[str, str],
         per_adapter_chunks: dict[str, list[RetrievedChunk]] | None = None,
         resolver_adapter_id: str | None = None,
+        long_form: bool = False,
     ) -> tuple[str, str, float]:
         """Synthesize multiple adapter outputs into a unified response.
 
@@ -878,7 +931,10 @@ class ParallelOrchestrator:
             or NO_EVIDENCE_PLACEHOLDER
         )
 
-        synthesis_text = SYNTHESIS_PROMPT_TEMPLATE.format(
+        template = (
+            SYNTHESIS_PROMPT_TEMPLATE_LONG_FORM if long_form else SYNTHESIS_PROMPT_TEMPLATE
+        )
+        synthesis_text = template.format(
             query=query,
             source_answers=source_answers,
             retrieved_evidence=retrieved_evidence,
@@ -906,10 +962,27 @@ class ParallelOrchestrator:
             if self.llm.has_expert_attached:
                 self.llm.detach_expert()
 
+        # Long-form synthesis lifts the construction-time cap (which is
+        # clamped to the short-factoid generation budget) so multi-paragraph
+        # QM answers fit; CF/SQA keep the tight strict-EM-friendly budget.
+        # Stop sequences are cleared for the same reason — the short-answer
+        # boundaries cut the Resolver off after the first heading newline.
+        synth_config = self._synthesis_config
+        if long_form:
+            from src.inference import GenerationConfig
+            synth_config = GenerationConfig(
+                max_new_tokens=self.synthesis_max_new_tokens_long_form,
+                temperature=self._synthesis_config.temperature,
+                top_p=self._synthesis_config.top_p,
+                do_sample=self._synthesis_config.do_sample,
+                repetition_penalty=self._synthesis_config.repetition_penalty,
+                stop_sequences=(),
+            )
+
         model, tokenizer = self.llm.get_inference_components()
         t_start = time.perf_counter()
         synthesized = generate_text(
-            model, tokenizer, synthesis_prompt, self._synthesis_config, self.use_gpu
+            model, tokenizer, synthesis_prompt, synth_config, self.use_gpu
         )
         t_end = time.perf_counter()
         latency_ms = (t_end - t_start) * 1000.0
@@ -928,6 +1001,7 @@ class ParallelOrchestrator:
     def generate(
         self,
         query: str,
+        long_form: bool = False,
         **kwargs: Any,
     ) -> OrchestratorResult:
         """Run the full Parallel-Orchestrator pipeline.
@@ -1013,7 +1087,7 @@ class ParallelOrchestrator:
             return self._generate_base_only(query, plan, query_embedding)
 
         adapter_outputs, latencies, per_adapter_chunks = self.execute_parallel(
-            query, selected, query_embedding=query_embedding,
+            query, selected, query_embedding=query_embedding, long_form=long_form,
         )
 
         if not adapter_outputs:
@@ -1050,6 +1124,7 @@ class ParallelOrchestrator:
             adapter_outputs,
             per_adapter_chunks=per_adapter_chunks,
             resolver_adapter_id=most_recent.adapter_id,
+            long_form=long_form,
         )
 
         # Audit string is the comma-joined per-adapter set so the eval

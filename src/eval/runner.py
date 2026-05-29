@@ -530,67 +530,13 @@ class EvalRunner:
             embedding_fn=embedding_fn,
         )
 
-        # Register adapters with prototype centroids.
-        #
-        # CRITICAL: `PrototypeRouter.register_adapter` defaults to a ZERO
-        # centroid when none is provided, which collapses routing (sim == 0
-        # for every expert → every query falls below `similarity_threshold`
-        # → winner_adapter=None).  We therefore load real centroids from the
-        # same `router_state/manifest.json` that the PnR/Parallel Orchestrator
-        # use, and fall back to the checkpoints directory only if no manifest
-        # is available (logging a loud warning in that case).
-        import json
-        import numpy as np
-
-        router = pipeline.get_router()
-        n_registered = 0
-        manifest_path = None
-        if self.config.router_state_path:
-            candidate = Path(self.config.router_state_path) / "manifest.json"
-            if candidate.exists():
-                manifest_path = candidate
-
-        if manifest_path is not None:
-            with open(manifest_path) as f:
-                manifest = json.load(f)
-            for adapter_id, info in manifest.get("adapters", {}).items():
-                centroid_list = info.get("centroid")
-                if centroid_list is None:
-                    logger.warning(
-                        f"Manifest entry for {adapter_id} has no centroid — skipping"
-                    )
-                    continue
-                centroid = np.asarray(centroid_list, dtype=np.float32)
-                router.register_adapter(
-                    adapter_id=adapter_id,
-                    path=info.get("adapter_path", ""),
-                    timestamp=float(info.get("timestamp", 0.0)),
-                    centroid=centroid,
-                )
-                n_registered += 1
-            logger.info(
-                f"Registered {n_registered} adapters with MORPHEUS router "
-                f"from {manifest_path}"
-            )
-        else:
-            logger.warning(
-                "No router_state manifest found; registering adapters WITHOUT "
-                "centroids. MORPHEUS routing will not work until centroids are "
-                "provided. Pass --router_state <dir> pointing at a manifest.json."
-            )
-            checkpoints_dir = Path(self.config.checkpoints_dir)
-            if checkpoints_dir.exists():
-                for adapter_dir in sorted(checkpoints_dir.iterdir()):
-                    if adapter_dir.is_dir() and (adapter_dir / "adapter_config.json").exists():
-                        adapter_id = adapter_dir.name
-                        router.register_adapter(
-                            adapter_id=adapter_id,
-                            path=str(adapter_dir),
-                            timestamp=adapter_dir.stat().st_mtime,
-                        )
-                        n_registered += 1
-                logger.info(f"Registered {n_registered} adapters with MORPHEUS router")
-
+        # MORPHEUS-as-evaluated runs only System 5 (KS hard_override bypass)
+        # + frozen-base fallback. The PrototypeRouter is instantiated above
+        # but receives no centroids, so it abstains for every query (no
+        # adapters registered → route() returns winner=None). Engaging the
+        # router would require loading centroids via PnR's router-state
+        # manifest — see tasks/lessons.md "Re-invoking a system on a new
+        # dataset" for the calibration-of-comparison bug that path produced.
         return pipeline
 
     def _attach_domain_classifier(self, router) -> None:
@@ -799,8 +745,7 @@ class EvalRunner:
         # config; orchestrator / baseline backends ignore it (warn instead).
         long_form_cfg = None
         if sample.split in self.config.long_form_splits:
-            if (self.config.parallel_orchestrator
-                    or self.config.lora_rag_adapter
+            if (self.config.lora_rag_adapter
                     or self.config.xlora_checkpoint):
                 logger.warning(
                     "Long-form split %r on a backend that ignores per-call "
@@ -820,7 +765,10 @@ class EvalRunner:
         t_start = time.perf_counter()
 
         if self.config.parallel_orchestrator:
-            result = pipeline.generate(query=sample.question)
+            result = pipeline.generate(
+                query=sample.question,
+                long_form=sample.split in self.config.long_form_splits,
+            )
         elif self.config.recipe_official_checkpoint:
             result = pipeline.generate(
                 query=sample.question,

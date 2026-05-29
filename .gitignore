@@ -99,3 +99,5 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
+morpheus_state_qm
+docs/roadmap.md

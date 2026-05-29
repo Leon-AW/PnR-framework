@@ -56,8 +56,21 @@ METHODS: list[dict[str, str | None]] = [
         "name":         "Parallel (multi-expert + 2-stage)",
         "situated_qa":  "parallel_phase5_sqa_deval",
         "counterfact":  "parallel_phase5_cf_deval",
-        # v3 QM (May 21, job 362314)
+        # v3 QM (May 21, job 362314) — short-form synthesis + DEFAULT_SHORT_ANSWER_BOUNDARIES
+        # stops on per-adapter generation. Kept as the as-published baseline for the
+        # comparison with the long-form variant below.
         "ait_qm":       "qm_deval_parallel_v3/pnr_qm_parallel_v3",
+    },
+    {
+        # May 28 rerun (job 364767) — same Phase-5 architecture, but with the long-form
+        # synthesis path: SYNTHESIS_PROMPT_TEMPLATE_LONG_FORM, synthesis budget 1536
+        # tokens, and stop_sequences=() on both per-adapter generation and the Resolver
+        # pass so multi-paragraph QM answers are not truncated at the first newline.
+        # Mirrors the long-form handling the runner already applies to PnR / RECIPE.
+        "name":         "Parallel (multi-expert + 2-stage, long-form synthesis)",
+        "situated_qa":  "parallel_phase5_sqa_deval",
+        "counterfact":  "parallel_phase5_cf_deval",
+        "ait_qm":       "qm_deval_parallel_longform_v3/pnr_qm_parallel_longform_v3",
     },
     {
         "name":         "RECIPE",
