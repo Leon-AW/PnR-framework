@@ -292,6 +292,53 @@ def load_report(run_dir: str | None) -> dict | None:
         return json.load(f)
 
 
+# ── inference efficiency ────────────────────────────────────────────────────────
+# Sourced from per-record results.json (report.json carries no efficiency block).
+# Comparison is fixed to the CounterFact D_eval run so every method is timed on the
+# same short-answer workload — this isolates the architectural per-query overhead
+# (single-adapter hard route vs. N-adapter ensemble + synthesis vs. retrieval bypass)
+# rather than conflating it with dataset answer length.
+EFFICIENCY_SOURCE_KEY = "counterfact"
+
+
+def _load_records(run_dir: str | None) -> list[dict] | None:
+    if run_dir is None:
+        return None
+    path = RESULTS_DIR / run_dir / "results.json"
+    if not path.exists():
+        return None
+    with path.open() as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else data.get("results", data)
+
+
+def _extract_efficiency(run_dir: str | None) -> dict[str, float | None]:
+    """Per-query inference cost from a run's results.json.
+
+    latency_ms is wall-clock per query (perf_counter); the first query carries a
+    cold-start / adapter-load spike, so the *median* is reported as the robust
+    typical-cost figure alongside p95. vram_mb is the per-query peak
+    (torch.cuda.max_memory_allocated, reset each query), so the run peak is the
+    max across records — the true VRAM footprint the method requires.
+    """
+    empty = {"eff_med_ms": None, "eff_p95_ms": None, "eff_vram": None, "eff_n": None}
+    recs = _load_records(run_dir)
+    if not recs:
+        return empty
+    lat = sorted(r["latency_ms"] for r in recs if r.get("latency_ms") is not None)
+    vram = [r["vram_mb"] for r in recs if r.get("vram_mb") is not None]
+    n = len(lat)
+    if n == 0:
+        return empty
+    import statistics
+    return {
+        "eff_med_ms": statistics.median(lat),
+        "eff_p95_ms": lat[min(int(n * 0.95), n - 1)],
+        "eff_vram":   max(vram) if vram else None,
+        "eff_n":      n,
+    }
+
+
 def build_rows() -> list[dict]:
     rows = []
     for method in METHODS:
@@ -390,6 +437,67 @@ def print_markdown(rows: list[dict]) -> None:
     print("_'—' = run missing or not yet scored._")
 
 
+def _fmt_num(v: Any, suffix: str = "") -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):,.0f}{suffix}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def print_efficiency_markdown(methods: list[dict]) -> None:
+    """Separate inference-efficiency table (CounterFact D_eval, per query).
+
+    Kept distinct from the accuracy table on purpose: this answers a *different*
+    axis (inference-time cost), and is NOT the exposé's "cost of updates vs
+    monolithic retraining" claim — that one is an update/training-cost benchmark
+    reported elsewhere.
+    """
+    print()
+    print("### Inference efficiency — CounterFact D_eval, per query")
+    print()
+    cols = [("Method", "<", 38), ("Median ms/q", ">", 11),
+            ("p95 ms/q", ">", 9), ("Peak VRAM (MB)", ">", 14), ("n", ">", 6)]
+    widths = [w for _, _, w in cols]
+    print("| " + " | ".join(
+        (h.ljust(w) if a == "<" else h.rjust(w)) for (h, a, w) in cols) + " |")
+    print("| " + " | ".join(
+        (":" + "-" * w if a == "<" else "-" * w + ":") for (_, a, w) in cols) + " |")
+    for m in methods:
+        eff = _extract_efficiency(m.get(EFFICIENCY_SOURCE_KEY))
+        cells = [
+            str(m["name"]).ljust(widths[0]),
+            _fmt_num(eff["eff_med_ms"]).rjust(widths[1]),
+            _fmt_num(eff["eff_p95_ms"]).rjust(widths[2]),
+            _fmt_num(eff["eff_vram"]).rjust(widths[3]),
+            _fmt_num(eff["eff_n"]).rjust(widths[4]),
+        ]
+        print("| " + " | ".join(cells) + " |")
+    print()
+    print("_Per-query inference cost on the CounterFact D_eval run "
+          "(conflict + control, short-answer). Median is robust to the "
+          "first-query cold-start/adapter-load spike; peak VRAM is the max "
+          "per-query allocation. **Caveat:** latency is comparable only insofar "
+          "as runs shared GPU type/load; treat as relative, not absolute. "
+          "MORPHEUS-bypass is fast precisely because it returns a stored value "
+          "without running the LLM._")
+
+
+def write_efficiency_csv(methods: list[dict], out_path: Path) -> None:
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Method", "median_ms_per_query", "p95_ms_per_query",
+                    "peak_vram_mb", "n"])
+        for m in methods:
+            eff = _extract_efficiency(m.get(EFFICIENCY_SOURCE_KEY))
+            def _r(v):
+                return "" if v is None else f"{float(v):.1f}"
+            w.writerow([m["name"], _r(eff["eff_med_ms"]), _r(eff["eff_p95_ms"]),
+                        _r(eff["eff_vram"]), eff["eff_n"] or ""])
+    print(f"Efficiency CSV written to {out_path}", file=sys.stderr)
+
+
 def write_csv(rows: list[dict], out_path: Path) -> None:
     cols = _all_columns()
     dataset_labels = (
@@ -438,10 +546,13 @@ def main() -> int:
 
     if args.format in ("markdown", "both"):
         print_markdown(rows)
+        print_efficiency_markdown(METHODS)
 
     if args.format in ("csv", "both"):
         out = Path(args.out) if args.out else RESULTS_DIR / "summary.csv"
         write_csv(rows, out)
+        eff_out = out.with_name(out.stem + "_efficiency.csv")
+        write_efficiency_csv(METHODS, eff_out)
 
     return 0
 
