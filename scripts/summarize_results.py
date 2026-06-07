@@ -34,6 +34,13 @@ METHODS: list[dict[str, str | None]] = [
         # standardised SQA D_eval (1 000 train + D_control, May 2)
         "situated_qa":  "frozen_base_sqa_deval",
         "counterfact":  "frozen_base_deval_v2",
+        # The CF columns (ESR/F1/TF/Judge) come from frozen_base_deval_v2, but its
+        # D_control split is the *old* (qb_*) build → FR=0.4 %. The Phase-5 PnR /
+        # Parallel rows use the rebuilt (tc_*/qz_*) D_control, so source the
+        # system-level FR / Judge-D_ctrl columns from frozen_base_sqa_deval, which
+        # ran the frozen base on that same rebuilt set (FR=0.6 %, identical 6
+        # records). This makes the System columns like-for-like across rows.
+        "system_source": "frozen_base_sqa_deval",
         # v3 (May 20, job 362311) — 3-bucket QM D_eval (stable/conflict/control)
         "ait_qm":       "qm_deval_frozen_v3/pnr_qm_frozen_v3",
     },
@@ -350,15 +357,16 @@ def build_rows() -> list[dict]:
                     row[field] = None
             else:
                 row.update(ds["extract"](report))
-        # System columns come from the counterfact run
-        cf_report = load_report(method.get("counterfact"))
-        if cf_report is not None:
-            cf_data = _extract_counterfact(cf_report)
-            for _, field, _, _ in SYSTEM_COLUMNS:
-                row.setdefault(field, cf_data.get(field))
-        else:
-            for _, field, _, _ in SYSTEM_COLUMNS:
-                row.setdefault(field, None)
+        # System columns (FR, Judge D_ctrl) come from the counterfact run by
+        # default, but a method may override via "system_source" when its CF run's
+        # D_control split is not the canonical (rebuilt) one — see Frozen Base.
+        # Direct assignment (not setdefault): _extract_counterfact already wrote
+        # cf_fr / sys_judge_ctrl into the row from the CF run during the DATASETS
+        # loop, so the system source must overwrite them to take effect.
+        sys_report = load_report(method.get("system_source") or method.get("counterfact"))
+        sys_data = _extract_counterfact(sys_report) if sys_report is not None else {}
+        for _, field, _, _ in SYSTEM_COLUMNS:
+            row[field] = sys_data.get(field)
         rows.append(row)
     return rows
 
