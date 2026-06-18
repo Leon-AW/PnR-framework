@@ -93,6 +93,7 @@ class CentroidRouter(BaseRouter):
         domain_classifier: "DomainClassifier | None" = None,
         domain_confidence_threshold: float = 0.7,
         domain_fallback_threshold: float = 0.30,
+        openset_detector: "OpenSetDetector | None" = None,
     ) -> None:
         """Initialize the Centroid Router.
 
@@ -139,6 +140,15 @@ class CentroidRouter(BaseRouter):
                 the OOD class was already filtered out at Stage 1, so the
                 Stage-2 bar can be more permissive without re-introducing
                 FR. Per-adapter calibrated τ_i still wins where present.
+            openset_detector: Optional open-set / OOD gate (leak-mitigation
+                follow-up). When supplied, a *confident* in-adapter-domain
+                Stage-1 prediction (cf/sqa/qm) is additionally checked against
+                the per-class Mahalanobis manifold: if the query is OOD for that
+                class it short-circuits to ``<NONE>`` (frozen base), exactly like
+                a confident ``ood_trivia``. This is the geometric reject option
+                the four-way softmax cannot express. ``None`` recovers the
+                production "before" behaviour verbatim (toggleable for the
+                before/after ablation). See ``src/routing/openset_detector.py``.
         """
         super().__init__(strategy=RoutingStrategy.CENTROID)
 
@@ -154,6 +164,7 @@ class CentroidRouter(BaseRouter):
         self._domain_classifier = domain_classifier
         self._domain_confidence_threshold = domain_confidence_threshold
         self._domain_fallback_threshold = domain_fallback_threshold
+        self._openset_detector = openset_detector
         
         # Initialize embedding model
         self._embedding_model = None
@@ -920,6 +931,36 @@ class CentroidRouter(BaseRouter):
                         has_conflict=False,
                         routing_strategy=RoutingStrategy.CENTROID,
                     )
+                # Open-set veto (leak mitigation): a confident in-adapter-domain
+                # prediction is the exact regime the open-stream stress test
+                # showed leaking. If the query is OOD for the predicted class's
+                # manifold, short-circuit to the frozen base like a confident
+                # ood_trivia. Disabled (None) ⇒ production "before" behaviour.
+                if self._openset_detector is not None:
+                    verdict = self._openset_detector.predict_single(
+                        query, predicted_class=top_class
+                    )
+                    if verdict["is_ood"]:
+                        logger.info(
+                            f"Open-set veto: Stage-1={top_class} "
+                            f"(prob={top_prob:.3f}) but OOD "
+                            f"(score={verdict['ood_score']:.1f} > "
+                            f"τ={verdict['threshold']:.1f}) → routing to <NONE>"
+                        )
+                        embedded = (
+                            query_embedding
+                            if query_embedding is not None
+                            else self.compute_embedding(query)
+                        )
+                        return RoutingResult(
+                            winner_adapter=None,
+                            winner_path=None,
+                            retrieved_context="",
+                            all_matches=[],
+                            query_embedding=embedded,
+                            has_conflict=False,
+                            routing_strategy=RoutingStrategy.CENTROID,
+                        )
                 allowed_adapter_ids = self._allowed_adapters_for_domain(top_class)
                 fallback_threshold = self._domain_fallback_threshold
 
