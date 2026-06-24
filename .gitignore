@@ -58,6 +58,9 @@ env/
 checkpoints/
 outputs/
 models/
+# ...but src/models/ is the model-wrapper source package, not weights
+!src/models/
+!src/models/*.py
 *.pt
 *.pth
 *.bin
