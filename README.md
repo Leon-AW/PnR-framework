@@ -410,7 +410,7 @@ pytest tests/morpheus/test_router.py  # one subsystem
 @mastersthesis{wagner2026pnr,
   title  = {A Modular ``Patch-and-Route'' Framework for Continual Learning in LLMs},
   author = {Wagner, Leon},
-  school = {Humboldt-Universit\"at zu Berlin},
+  school = {Humboldt-Universität zu Berlin},
   year   = {2026}
 }
 ```
