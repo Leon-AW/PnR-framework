@@ -103,4 +103,6 @@ dmypy.json
 Thumbs.db
 
 morpheus_state_qm
-docs/roadmap.md
+
+# Local docs (thesis sources, figures, grading criteria) — not published to remote
+docs/

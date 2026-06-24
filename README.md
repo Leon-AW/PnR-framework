@@ -4,8 +4,6 @@
 
 Reference implementation for the master's thesis of the same name (Leon Wagner, Humboldt-Universität zu Berlin). PnR lets a large language model integrate **conflicting, domain-specific knowledge updates without catastrophic forgetting**, at a per-update cost far below full retraining and with negligible inference overhead.
 
-> The full thesis (LaTeX source) lives in [`docs/master-thesis/`](docs/master-thesis/).
-
 ---
 
 ## Table of Contents
@@ -21,7 +19,7 @@ Reference implementation for the master's thesis of the same name (Leon Wagner, 
 - [Evaluation](#evaluation)
 - [Baselines](#baselines)
 - [Open-Stream Stress Test & Mitigation](#open-stream-stress-test--mitigation)
-- [MORPHEUS (Exploratory Architecture)](#morpheus-exploratory-architecture)
+- [Retrieval-Cache Oracle (Recall Ceiling)](#retrieval-cache-oracle-recall-ceiling)
 - [Experiment Tracking (MLflow)](#experiment-tracking-mlflow)
 - [Tests](#tests)
 - [Citation](#citation)
@@ -121,7 +119,7 @@ PnR-framework/
 │   ├── routing/                # centroid router, domain gate, open-set detector, orchestrator, source-replay
 │   ├── training/               # PatchAndRouteTrainer, TrainingConfig, train_adapter()
 │   ├── baselines/              # X-LoRA, LoRA+RAG, official RECIPE wrappers
-│   ├── morpheus/               # exploratory 6-subsystem cognitive architecture (+165 unit tests)
+│   ├── morpheus/               # retrieval-cache oracle + exploratory cognitive architecture (+165 unit tests)
 │   ├── eval/                   # EvalRunner, dataset builders, metrics, LLM-as-judge
 │   ├── data/                   # semantic / structure-aware chunkers, local JSON loader
 │   └── utils/                  # config IO, logging, MLflow tracker
@@ -130,7 +128,6 @@ PnR-framework/
 ├── slurm/                      # SLURM batch jobs (training, eval, data build, sweeps)
 ├── tests/morpheus/             # pytest suite for the MORPHEUS subsystems
 ├── examples/router_demo.py     # standalone routing demo
-├── docs/master-thesis/         # the thesis (LaTeX)
 ├── environment.yml             # conda env "pnr"  (recommended)
 ├── requirements.txt            # pip-only fallback
 └── pyproject.toml              # package "patch-and-route"
@@ -303,7 +300,7 @@ python eval_pnr.py --monolithic checkpoints/monolithic_v1 --eval_sets base --n_s
 | `--xlora <ckpt>` | X-LoRA soft gating |
 | `--recipe_official <ckpt>` | official RECIPE (EMNLP 2024); add `--recipe_official_edits` |
 | `--lora_rag <adapter>` | LoRA + RAG hybrid (`--lora_rag_index`) |
-| `--morpheus` | MORPHEUS multi-system architecture (see below) |
+| `--morpheus` | Retrieval-cache oracle (recall ceiling; see below) |
 
 Other useful flags: `--n_samples`, `--model_id`, `--checkpoints_dir`, `--quantization {int4,int8,none}`, `--similarity_threshold`, `--domain_classifier_path`, `--use_llm_judge`, `--compute_logprob`.
 
@@ -362,15 +359,17 @@ It cuts the English OOD leak from 17.2 % to 5.8 % at a 2.7 % recall cost. The Ge
 
 ---
 
-## MORPHEUS (Exploratory Architecture)
+## Retrieval-Cache Oracle (Recall Ceiling)
 
-`src/morpheus/` contains an exploratory, brain-inspired six-subsystem extension (stable core / expert bank / fast buffer / consolidation / knowledge store / meta-controller) with a prototype router and a sleep-style consolidation cycle. It is the most experimental part of the codebase and the only part with a dedicated unit-test suite.
+In the thesis this system is the **retrieval-cache oracle** — *a recall ceiling, not a competing architecture* (Section 6.5). It is a 1-NN retrieval cache with a reject option whose store is seeded with the evaluation facts. In `bypass` mode it returns the stored answer verbatim without running the LLM (an upper bound on retrieval recall, ~98.3 % CF ESR); in `no-bypass` mode it forces generation through the activated specialist (~0.4 % CF ESR). The gap shows that retrieval-conditioned context *alone* cannot override the model's parametric beliefs — which is exactly why PnR's isolated parametric experts are needed. Oracle numbers are marked `†` throughout the thesis and are never reported as an architecture result.
+
+In the codebase it is implemented under `src/morpheus/` (a broader, exploratory brain-inspired cognitive architecture — stable core / expert bank / fast buffer / consolidation / knowledge store / meta-controller) and is exposed via the `--morpheus` flag. That wider architecture is the most experimental part of the repo and the only part with a dedicated unit-test suite.
 
 ```bash
-# static inference (same metrics as PnR)
+# retrieval-cache oracle as a recall ceiling (same metrics as PnR)
 python eval_pnr.py --morpheus --eval_sets base temporal --n_samples 100
 
-# continual-learning eval: sequential domains, forgetting curve, expert lifecycle
+# exploratory continual-learning eval: sequential domains, forgetting curve, expert lifecycle
 python eval_morpheus_continual.py --domains cf sqa qm --architecture morpheus
 python eval_morpheus_continual.py --routing_only --domains cf sqa qm   # no LLM needed
 ```
@@ -395,7 +394,7 @@ All training/eval scripts accept `--experiment_name` and `--run_name`.
 
 ## Tests
 
-The MORPHEUS subsystems are covered by ~165 unit tests:
+The `src/morpheus/` subsystems (the retrieval-cache oracle and the broader exploratory architecture) are covered by ~165 unit tests:
 
 ```bash
 pip install -e ".[dev]"
